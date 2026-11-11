@@ -8,9 +8,10 @@ the Project Owner.
 1. **Dispute when funds were already withdrawn.** A dispute moves the deposit's
    amount from `available` to `held` without checking `available` is large enough,
    so `available` can go negative (deposit 2.0, withdraw 1.5, dispute the deposit:
-   `available = -1.5`, `held = 2.0`, `total = 0.5`). Current choice: allow it, since
+   `available = -1.5`, `held = 2.0`, `total = 0.5`). Decided: allow it, since
    the funds really are in dispute; rejecting would let a client withdraw disputed
-   money and dodge the dispute. No test pins this down yet.
+   money and dodge the dispute. Negative balances come from disputes only;
+   withdrawal rules are unchanged. Pinned by tests in `tests/pipeline.rs`.
 2. **Disputes on withdrawals.** Only deposits are disputable; disputing a
    withdrawal is rejected (`NotDisputable`).
 3. **Locked accounts.** A chargeback locks the account, which then rejects
@@ -44,17 +45,27 @@ the Project Owner.
 9. **Unknown `type` is fatal.** An unknown type, negative amount or unparsable
    client aborts the run. Alternative: skip and report the row like a rule
    rejection. Fatal was chosen so bad data is not silently dropped.
-10. **Missing amount on deposit/withdrawal** is a rule rejection (`InvalidAmount`),
-    not a fatal error. Confirm the intended behavior.
+10. **Missing amount on deposit/withdrawal.** Today a rule rejection
+    (`InvalidAmount`), which also claims the tx id. Decided (not yet implemented):
+    treat it as malformed input, a decode error in the CSV adapter, not a business
+    rule. Defaulting to 0 was rejected: a truncated row would become a zero
+    deposit that takes the tx id, and the correct redelivery would then be
+    rejected as a conflicting duplicate. An explicit `0` stays valid.
+11. **A malformed row aborts the run but is not atomic.** Rows are applied as they
+    stream, so rows before the bad one stay committed and the run exits non-zero.
+    Decided: prefer throughput (batching) over early error detection, so with
+    batching the rows of the batch in flight when the error hits need a defined
+    outcome (rolled back and retried or bisected; see item 14). Documented in the
+    README.
 
 ## Design debt
 
-11. **Amount range.** `Amount` is an `i64` count of ten-thousandths, so one amount
+12. **Amount range.** `Amount` is an `i64` count of ten-thousandths, so one amount
    or balance tops out at 922337203685477.5807 (~922 trillion units). Anything
    larger (including a balance sum) is rejected as `Overflow` rather than
-   wrapped. A decimal crate would not widen this on SQLite (see 12).
+   wrapped. A decimal crate would not widen this on SQLite (see 13).
 
-12. **`Amount` is hand-rolled** (`i64` ten-thousandths). Decision: keep it for now.
+13. **`Amount` is hand-rolled** (`i64` ten-thousandths). Decision: keep it for now.
     A `rust_decimal` spike (`Amount(Decimal)`, stored as `i64`) was evaluated:
     - Behavior, output and speed were identical (1M rows, ~47 s either way).
     - It removed only ~15 lines (the tail of `from_str` and `Display`).
@@ -70,7 +81,7 @@ the Project Owner.
     Revisit if Postgres `NUMERIC` becomes the primary backend: stored natively,
     a decimal type would drop the clamp and the manual impls and widen the range.
 
-13. **Throughput and batching.** One commit per record gives ~600 rows/s on a
+14. **Throughput and batching.** One commit per record gives ~600 rows/s on a
     local Postgres versus ~20k rows/s on SQLite. Options: a savepoint per record
     inside batched transactions, or sharding streams by client. Batching trades
     per-record isolation and crash granularity for speed: on error, a whole
@@ -78,18 +89,18 @@ the Project Owner.
     (examples/gen_load.rs) show ~22k rows/s uncontended on in-memory SQLite, i.e.
     days for a full u32-range input; the in-memory backend also keeps every tx
     (~23 bytes/row) in RAM.
-14. **No migrations.** Tables are created with `IF NOT EXISTS`.
-15. **Output order is unspecified**; fine for the spec, but sort before diffing
+15. **No migrations.** Tables are created with `IF NOT EXISTS`.
+16. **Output order is unspecified**; fine for the spec, but sort before diffing
     two runs.
 
 ## Tech
 
-16. **Logging.** Implemented: `tracing` replaces `eprintln!`. The lib only emits
+17. **Logging.** Implemented: `tracing` replaces `eprintln!`. The lib only emits
     events/spans; the binary installs the subscriber (`src/telemetry.rs`). Text by
     default, JSON with `LOG_FORMAT=json`, filter from `RUST_LOG` (default `warn`),
     stdout stays CSV-only
     (see README, "Logging").
-17. **OTEL export (follow-up, not implemented).** Export traces to an OTLP endpoint.
+18. **OTEL export (follow-up, not implemented).** Export traces to an OTLP endpoint.
     Notes for whoever picks it up:
     - optional `otlp` cargo feature; no OpenTelemetry crate in the default build;
     - OTLP over http-proto with rustls preferred;
@@ -101,9 +112,9 @@ the Project Owner.
       `opentelemetry`, `opentelemetry_sdk` and `opentelemetry-otlp` versions move
       in lockstep;
     - PII rule: client and tx ids are fine as attributes, never the database URL.
-18. **Rejection floods.** One line per rejected row, no rate limit or sampling. A
+19. **Rejection floods.** One line per rejected row, no rate limit or sampling. A
     bad input can produce billions of stderr lines; consider a cap, sampling or
     counting only after N rejections.
-19. **Per-record span cost.** The `record` span (TRACE) sits in the hot loop.
+20. **Per-record span cost.** The `record` span (TRACE) sits in the hot loop.
     Disabled at the default filter it showed no measurable cost on 1M rows, but its
     cost when enabled (and with an OTEL layer) at billions of rows is unmeasured.

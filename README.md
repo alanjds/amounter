@@ -57,8 +57,12 @@ The header is always the first line, even with no accounts. Amounts always have
   and it cannot be disputed.
 - A locked account (after a chargeback) rejects deposits and withdrawals. Dispute,
   resolve and chargeback are still accepted on a locked account.
-- Only deposits can be disputed: dispute moves available → held, resolve moves
-  held → available, chargeback removes the held funds and locks the account.
+- Only deposits can be disputed (a dispute of a withdrawal is rejected): dispute
+  moves available → held, resolve moves held → available, chargeback removes the
+  held funds and locks the account.
+- A dispute may drive `available` negative (deposit 2.0, withdraw 1.5, dispute the
+  deposit: available -1.5, held 2.0, total 0.5). This is the only way a balance
+  goes negative; withdrawals still need `available` to cover them.
 - Dispute, resolve and chargeback must reference a transaction of the same client,
   in the right state.
 
@@ -167,6 +171,10 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 - **Throughput:** one commit per record. About 20k rows/s on SQLite, but only
   ~600 rows/s against a local Postgres. Batching (a savepoint per record inside a
   larger transaction) or sharding by client would help.
+- **Not atomic on a bad row:** rows are applied as they stream, so a malformed row
+  aborts the run (non-zero exit) after the earlier rows are already committed.
+  This is deliberate: throughput (batching) is preferred over early error
+  detection, so do not rely on all-or-nothing input handling.
 - **Schema:** tables are created with `IF NOT EXISTS`; there are no migrations.
 - **SQLite** uses a single connection, so concurrency there is serialized; row
   locks only matter on Postgres.

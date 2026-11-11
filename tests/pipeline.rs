@@ -101,6 +101,62 @@ const HEADER: &str = "client,available,held,total,locked\n";
     "},
     1
 )]
+#[case::dispute_unknown_tx_ignored(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        dispute,1,99,
+    "},
+    indoc! {"
+        1,2.0000,0.0000,2.0000,false
+    "},
+    1
+)]
+#[case::dispute_unknown_tx_creates_no_account(
+    indoc! {"
+        type,client,tx,amount
+        dispute,7,99,
+    "},
+    "",
+    1
+)]
+#[case::dispute_withdrawal_ignored(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        withdrawal,1,2,0.5
+        dispute,1,2,
+    "},
+    indoc! {"
+        1,1.5000,0.0000,1.5000,false
+    "},
+    1
+)]
+#[case::dispute_may_drive_available_negative(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        withdrawal,1,2,1.5
+        dispute,1,1,
+    "},
+    indoc! {"
+        1,-1.5000,2.0000,0.5000,false
+    "},
+    0
+)]
+#[case::withdrawal_still_rejected_while_available_negative(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        withdrawal,1,2,1.5
+        dispute,1,1,
+        withdrawal,1,3,0.0001
+    "},
+    indoc! {"
+        1,-1.5000,2.0000,0.5000,false
+    "},
+    1
+)]
 #[case::resolve_without_dispute_ignored(
     indoc! {"
         type,client,tx,amount
