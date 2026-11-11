@@ -75,6 +75,22 @@ be deduplicated: a redelivered `dispute` that arrives after a `resolve` disputes
 the transaction again. Within a state machine they are only protected by the
 state checks (e.g. a second `chargeback` is rejected because nothing is held).
 
+## Logging
+
+Logs use [`tracing`](https://docs.rs/tracing). Set `LOG_FORMAT` and `RUST_LOG` to control it.
+
+Default:
+
+```text
+2026-11-11T18:22:50.073063Z  WARN amounter: rejected row=2 reason=insufficient available funds
+```
+
+With `LOG_FORMAT=json`:
+
+```json
+{"timestamp":"2026-11-11T15:55:31.899968Z","level":"WARN","fields":{"message":"rejected","row":2,"reason":"insufficient available funds"},"target":"amounter"}
+```
+
 ## Library
 
 ```rust
