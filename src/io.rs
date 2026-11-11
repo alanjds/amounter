@@ -5,8 +5,12 @@ use futures_util::TryStreamExt;
 use sea_orm::EntityTrait;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tracing::Instrument;
 
 use crate::{Amount, Error, Rejection, Result, Store, engine, entity::account, model::Record};
+
+/// Emit an INFO progress event every this many rows.
+const PROGRESS_EVERY: u64 = 1_000_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
@@ -23,6 +27,7 @@ pub struct Summary {
 /// 1-based data row); those rows are skipped. Replays of an identical
 /// deposit/withdrawal are counted in [`Summary::duplicates`], not rejected. Malformed CSV or database
 /// failures abort with an error. Records of one stream are applied in order.
+#[tracing::instrument(skip_all)]
 pub async fn process<R: AsyncRead + Unpin + Send>(
     input: R,
     store: &Store,
@@ -41,13 +46,25 @@ pub async fn process<R: AsyncRead + Unpin + Send>(
         line.trim();
         let rec: Record = line.deserialize(Some(&headers))?;
         row += 1;
-        match engine::apply(store, &rec).await? {
+        let outcome = engine::apply(store, &rec)
+            .instrument(tracing::trace_span!("record", row))
+            .await?;
+        match outcome {
             Ok(engine::Outcome::Applied) => summary.applied += 1,
             Ok(engine::Outcome::Duplicate) => summary.duplicates += 1,
             Err(reason) => {
                 summary.rejected += 1;
                 on_reject(row, &reason);
             }
+        }
+        if row.is_multiple_of(PROGRESS_EVERY) {
+            tracing::info!(
+                rows = row,
+                applied = summary.applied,
+                duplicates = summary.duplicates,
+                rejected = summary.rejected,
+                "progress"
+            );
         }
     }
     Ok(summary)
@@ -89,6 +106,7 @@ impl TryFrom<account::Model> for ReportRow {
 /// streaming rows from the database in no particular order. The header is
 /// always the first line, even with no accounts. Flushes `output` but leaves closing it
 /// (e.g. a socket shutdown) to the caller.
+#[tracing::instrument(skip_all)]
 pub async fn write_report<W: AsyncWrite + Unpin + Send>(
     store: &Store,
     mut output: W,

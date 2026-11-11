@@ -1,8 +1,13 @@
 //! Helpers shared by the integration tests (`mod common;`).
+//!
+//! Each test file is its own crate and uses only some of these.
+#![allow(dead_code)]
 
 use rstest::fixture;
 use std::{
+    io::Write,
     path::PathBuf,
+    process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -49,4 +54,43 @@ pub fn assert_report_eq(actual: &str, expected: &str) {
         (header, rows)
     }
     assert_eq!(split(actual), split(expected), "actual:\n{actual}");
+}
+
+pub fn bin() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_amounter"));
+    // Don't inherit the developer's shell.
+    for var in ["DATABASE_URL", "RUST_LOG", "LOG_FORMAT"] {
+        c.env_remove(var);
+    }
+    c
+}
+
+/// A finished run with its output already decoded as text.
+pub struct CliResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Spawns `cmd`, pipes `stdin` to it, closes the pipe, and waits for it to exit.
+pub fn run_cli(cmd: &mut Command, stdin: &str) -> CliResult {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // `take()` hands the pipe to this statement; dropping it closes stdin (EOF).
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    CliResult {
+        success: out.status.success(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    }
 }

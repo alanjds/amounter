@@ -72,9 +72,26 @@ the Project Owner.
 
 ## Tech
 
-16. **Logging is `eprintln!`.** Replace print-style output with `tracing`: the lib
-    only emits events/spans, the binary installs the subscriber. Text by default,
-    JSON when `LOG_FORMAT=json`, and the option to export traces to an OTEL (OTLP)
-    endpoint (ideally behind a cargo feature). stdout must stay CSV-only. Open
-    points: how rejections, `-q` and `RUST_LOG` interact, and per-row span cost at
-    billions of rows. A plan is being drafted; nothing is implemented.
+16. **Logging.** Implemented: `tracing` replaces `eprintln!`. The lib only emits
+    events/spans; the binary installs the subscriber (`src/telemetry.rs`). Text by
+    default, JSON with `LOG_FORMAT=json`, filter from `RUST_LOG` (default `warn`),
+    stdout stays CSV-only
+    (see README, "Logging").
+17. **OTEL export (follow-up, not implemented).** Export traces to an OTLP endpoint.
+    Notes for whoever picks it up:
+    - optional `otlp` cargo feature; no OpenTelemetry crate in the default build;
+    - OTLP over http-proto with rustls preferred;
+    - standard `OTEL_EXPORTER_OTLP_*` env vars; add the layer only when an
+      endpoint is configured;
+    - bounded flush/shutdown before exit, inside the tokio runtime;
+    - separate per-layer filter, so stderr logging and export can differ;
+    - pin the opentelemetry family together: `tracing-opentelemetry`,
+      `opentelemetry`, `opentelemetry_sdk` and `opentelemetry-otlp` versions move
+      in lockstep;
+    - PII rule: client and tx ids are fine as attributes, never the database URL.
+18. **Rejection floods.** One line per rejected row, no rate limit or sampling. A
+    bad input can produce billions of stderr lines; consider a cap, sampling or
+    counting only after N rejections.
+19. **Per-record span cost.** The `record` span (TRACE) sits in the hot loop.
+    Disabled at the default filter it showed no measurable cost on 1M rows, but its
+    cost when enabled (and with an OTEL layer) at billions of rows is unmeasured.

@@ -14,7 +14,8 @@ amounter transactions.csv                      # throwaway in-memory SQLite
 cat transactions.csv | amounter -              # stdin (`-`, `--`, or no argument)
 amounter --database-url 'sqlite://ledger.db?mode=rwc' transactions.csv
 DATABASE_URL=postgres://user:pw@host/db amounter transactions.csv
-amounter -q transactions.csv                   # don't report rejections on stderr
+RUST_LOG=error amounter transactions.csv         # only errors on stderr (no rejection lines)
+LOG_FORMAT=json amounter transactions.csv      # structured logs on stderr
 ```
 
 State persists in the database between runs, so a second run continues the ledger
@@ -62,8 +63,8 @@ The header is always the first line, even with no accounts. Amounts always have
   in the right state.
 
 A rule violation *rejects* the record: it is skipped and reported on stderr as
-`row N: rejected: reason`. Malformed CSV or a database failure is fatal (non-zero
-exit, `error: ...`).
+a `WARN` log line with `row` and `reason` (see [Logging](#logging)). Malformed CSV or a database
+failure is fatal (non-zero exit, logged as `ERROR`).
 
 ### Redelivery caveat
 
@@ -80,10 +81,12 @@ state checks (e.g. a second `chargeback` is rejected because nothing is held).
 use amounter::{Store, process, write_report};
 
 let store = Store::connect("sqlite://ledger.db?mode=rwc").await?;
-let summary = process(reader, &store, |row, why| eprintln!("row {row}: {why}")).await?;
+let summary = process(reader, &store, |row, why| tracing::warn!(row, %why, "rejected")).await?;
 write_report(&store, &mut writer).await?;
 ```
 
+- The library never installs a logger; install a `tracing` subscriber in your
+  binary to see its events.
 - `Store` is cheap to `clone()` (it shares the connection pool).
 - `process` reads one row at a time (memory is independent of input size) and
   applies each record in its own database transaction, locking the client's
@@ -103,7 +106,7 @@ loop {
     let store = store.clone();
     tokio::spawn(async move {
         let (reader, mut writer) = socket.into_split();
-        process(reader, &store, |row, why| eprintln!("row {row}: {why}")).await?;
+        process(reader, &store, |row, why| tracing::warn!(row, %why, "rejected")).await?;
         write_report(&store, &mut writer).await?;
         writer.shutdown().await?;
         Ok::<_, amounter::Error>(())
@@ -140,6 +143,7 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 | `src/engine.rs` | ledger rules, one DB transaction per record |
 | `src/io.rs` | `process` and `write_report` |
 | `src/main.rs` | clap CLI |
+| `src/telemetry.rs` | CLI-only `tracing` subscriber setup (text/JSON, filters) |
 | `tests/` | CLI, pipeline and concurrency tests; `common/` shared fixtures |
 
 ## Known limitations

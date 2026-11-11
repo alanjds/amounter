@@ -5,8 +5,7 @@ use crate::{
     entity::{account, transaction},
 };
 
-/// Handle to the database. Cheap to clone (it shares a connection pool), so a
-/// server can give every client connection its own copy.
+/// Handle to the database.
 ///
 /// Backend is chosen by URL scheme: `sqlite://…` or `postgres://…`.
 #[derive(Clone, Debug)]
@@ -15,9 +14,14 @@ pub struct Store {
 }
 
 impl Store {
+    #[tracing::instrument(skip_all, fields(backend = scheme(url)))]
     pub async fn connect(url: &str) -> Result<Self> {
         let mut opts = ConnectOptions::new(url);
-        opts.sqlx_logging(false);
+
+        // Set RUST_LOG=...,sqlx=debug` if you want all SQL calls. I wouldn't.
+        opts.sqlx_logging(tracing::enabled!(target: "sqlx::query", tracing::Level::DEBUG))
+            .sqlx_logging_level(log::LevelFilter::Debug);
+
         if url.starts_with("sqlite") {
             // SQLite has a single writer anyway, and every in-memory
             // connection would otherwise be its own separate database.
@@ -31,7 +35,7 @@ impl Store {
         Self::connect("sqlite::memory:").await
     }
 
-    /// Wraps an existing connection and creates the tables if missing.
+    /// Tables are created IF NOT EXISTS. No migrations for now.
     pub async fn from_connection(db: DatabaseConnection) -> Result<Self> {
         let backend = db.get_database_backend();
         let schema = Schema::new(backend);
@@ -46,5 +50,22 @@ impl Store {
 
     pub fn db(&self) -> &DatabaseConnection {
         &self.db
+    }
+}
+
+/// URL scheme only (`sqlite`, `postgres`), safe to log.
+fn scheme(url: &str) -> &str {
+    url.split_once(':').map_or("unknown", |(scheme, _)| scheme)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scheme;
+
+    #[test]
+    fn scheme_hides_credentials() {
+        assert_eq!(scheme("postgres://user:secret@host/db"), "postgres");
+        assert_eq!(scheme("sqlite::memory:"), "sqlite");
+        assert_eq!(scheme("garbage"), "unknown");
     }
 }

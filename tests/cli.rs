@@ -1,48 +1,8 @@
 use indoc::indoc;
 use rstest::rstest;
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
 
 mod common;
-use common::{TempDb, assert_report_eq, temp_db};
-
-fn bin() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_amounter"));
-    c.env_remove("DATABASE_URL"); // don't inherit the developer's shell
-    c
-}
-
-/// A finished run with its output already decoded as text.
-struct CliResult {
-    success: bool,
-    stdout: String,
-    stderr: String,
-}
-
-/// Spawns `cmd`, pipes `stdin` to it, closes the pipe, and waits for it to exit.
-fn run_cli(cmd: &mut Command, stdin: &str) -> CliResult {
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // `take()` hands the pipe to this statement; dropping it closes stdin (EOF).
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    CliResult {
-        success: out.status.success(),
-        stdout: String::from_utf8(out.stdout).unwrap(),
-        stderr: String::from_utf8(out.stderr).unwrap(),
-    }
-}
+use common::{TempDb, assert_report_eq, bin, run_cli, temp_db};
 
 #[rstest]
 #[case::dash("-")]
@@ -62,14 +22,14 @@ fn reads_stdin_and_writes_csv_to_stdout(#[case] stdin_mark: &str) {
             1,1.0000,0.0000,1.0000,false
         "}
     );
-    assert!(result.stderr.contains("row 2: rejected: insufficient"));
+    assert!(result.stderr.contains("rejected row=2 reason=insufficient"));
 }
 
 #[test]
 fn missing_file_fails() {
     let result = run_cli(bin().arg("/nonexistent.csv"), "");
     assert!(!result.success);
-    assert!(result.stderr.starts_with("error:"));
+    assert!(result.stderr.contains("ERROR"));
 }
 
 #[rstest]
@@ -115,7 +75,7 @@ fn processes_fixture_file() {
     );
     // Client 2 only has 2.0, so the 3.0 withdrawal (row 5) is rejected.
     assert!(
-        result.stderr.contains("row 5: rejected: insufficient"),
+        result.stderr.contains("rejected row=5 reason=insufficient"),
         "{}",
         result.stderr
     );

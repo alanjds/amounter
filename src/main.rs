@@ -1,11 +1,15 @@
 use std::{path::PathBuf, process::ExitCode};
 
+mod telemetry;
+
 use amounter::{Store, process, write_report};
 use clap::Parser;
+use telemetry::LogFormat;
 use tokio::{
     fs::File,
     io::{self, AsyncRead, AsyncWriteExt, BufWriter},
 };
+use tracing::Instrument;
 
 /// Reads transactions from a CSV, stores them in a database, and prints
 /// per-client account balances as CSV on stdout.
@@ -23,9 +27,14 @@ struct Cli {
     #[arg(long, value_name = "URL", env = "DATABASE_URL")]
     database_url: Option<String>,
 
-    /// Don't report rejected records on stderr.
-    #[arg(short, long)]
-    quiet: bool,
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        env = "LOG_FORMAT",
+        default_value = "text"
+    )]
+    log_format: LogFormat,
 }
 
 async fn run(cli: Cli) -> amounter::Result<()> {
@@ -39,17 +48,11 @@ async fn run(cli: Cli) -> amounter::Result<()> {
     };
 
     let summary = process(input, &store, |row, reason| {
-        if !cli.quiet {
-            eprintln!("row {row}: rejected: {reason}");
-        }
+        tracing::warn!(row, reason = %reason, "rejected");
     })
     .await?;
-    if !cli.quiet && (summary.rejected > 0 || summary.duplicates > 0) {
-        eprintln!(
-            "{} applied, {} duplicate, {} rejected",
-            summary.applied, summary.duplicates, summary.rejected
-        );
-    }
+    let (applied, duplicates, rejected) = (summary.applied, summary.duplicates, summary.rejected);
+    tracing::info!(applied, duplicates, rejected, "done");
 
     let mut out = BufWriter::new(io::stdout());
     write_report(&store, &mut out).await?;
@@ -59,10 +62,16 @@ async fn run(cli: Cli) -> amounter::Result<()> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse()).await {
+    let cli = Cli::parse();
+    if let Err(e) = telemetry::init(cli.log_format) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    let span = tracing::info_span!("run");
+    match run(cli).instrument(span).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            tracing::error!("{e}");
             ExitCode::FAILURE
         }
     }
