@@ -5,21 +5,16 @@ use crate::Amount;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "i16", db_type = "SmallInteger")]
 pub enum TxKind {
-    #[sea_orm(num_value = 0)]
-    Deposit,
-    #[sea_orm(num_value = 1)]
-    Withdrawal,
+    Deposit = 0,
+    Withdrawal = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "i16", db_type = "SmallInteger")]
 pub enum TxState {
-    #[sea_orm(num_value = 0)]
-    Normal,
-    #[sea_orm(num_value = 1)]
-    Disputed,
-    #[sea_orm(num_value = 2)]
-    ChargedBack,
+    Normal = 0,
+    Disputed = 1,
+    ChargedBack = 2,
 }
 
 /// A persisted deposit/withdrawal, kept so later disputes can reference it.
