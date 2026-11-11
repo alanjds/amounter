@@ -50,14 +50,26 @@ the Project Owner.
 ## Design debt
 
 11. **Amount range.** `Amount` is an `i64` count of ten-thousandths, so one amount
-   or balance tops out around 922 trillion units. Anything larger (including a
-   balance sum) is rejected as `Overflow` rather than wrapped. Re-check the limit
-   when moving to a money crate.
+   or balance tops out at 922337203685477.5807 (~922 trillion units). Anything
+   larger (including a balance sum) is rejected as `Overflow` rather than
+   wrapped. A decimal crate would not widen this on SQLite (see 12).
 
-12. **`Amount` is hand-rolled** (`i64` ten-thousandths). Plan: replace it with an
-   existing money/decimal crate, keeping 4-decimal output and the checked
-   add/sub semantics. The `DeriveValueType` / serde impls in `src/amount.rs` are
-   the surface to port.
+12. **`Amount` is hand-rolled** (`i64` ten-thousandths). Decision: keep it for now.
+    A `rust_decimal` spike (`Amount(Decimal)`, stored as `i64`) was evaluated:
+    - Behavior, output and speed were identical (1M rows, ~47 s either way).
+    - It removed only ~15 lines (the tail of `from_str` and `Display`).
+      Digit validation stays ours, because `Decimal::from_str` accepts `+1`, `1e3`,
+      `.5` and `1_0`. Checked add/sub were already one-liners.
+    - It added code: a `bounded()` range clamp and five manual SeaORM impls in
+      place of `DeriveValueType` (`src/amount.rs` went from 135 to 208 lines,
+      including tests), plus two dependencies.
+    - SeaORM maps `Decimal` to REAL (f64) on SQLite, which silently loses
+      precision (`922337203685477.5807` came back as `922337203685478`).
+      Enabling `with-rust_decimal` or changing the column type would do this
+      without any error.
+    Revisit if Postgres `NUMERIC` becomes the primary backend: stored natively,
+    a decimal type would drop the clamp and the manual impls and widen the range.
+
 13. **Throughput and batching.** One commit per record gives ~600 rows/s on a
     local Postgres versus ~20k rows/s on SQLite. Options: a savepoint per record
     inside batched transactions, or sharding streams by client. Batching trades
