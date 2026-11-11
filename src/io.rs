@@ -11,6 +11,8 @@ use crate::{Amount, Error, Rejection, Result, Store, engine, entity::account, mo
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub applied: u64,
+    /// Identical deposits/withdrawals seen before, ignored.
+    pub duplicates: u64,
     pub rejected: u64,
 }
 
@@ -18,7 +20,8 @@ pub struct Summary {
 ///
 /// Rows are read one at a time, so memory use is independent of input size.
 /// `on_reject(row, reason)` is called for each rule violation (`row` is the
-/// 1-based data row); those rows are skipped. Malformed CSV or database
+/// 1-based data row); those rows are skipped. Replays of an identical
+/// deposit/withdrawal are counted in [`Summary::duplicates`], not rejected. Malformed CSV or database
 /// failures abort with an error. Records of one stream are applied in order.
 pub async fn process<R: AsyncRead + Unpin + Send>(
     input: R,
@@ -39,7 +42,8 @@ pub async fn process<R: AsyncRead + Unpin + Send>(
         let rec: Record = line.deserialize(Some(&headers))?;
         row += 1;
         match engine::apply(store, &rec).await? {
-            Ok(()) => summary.applied += 1,
+            Ok(engine::Outcome::Applied) => summary.applied += 1,
+            Ok(engine::Outcome::Duplicate) => summary.duplicates += 1,
             Err(reason) => {
                 summary.rejected += 1;
                 on_reject(row, &reason);

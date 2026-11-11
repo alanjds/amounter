@@ -48,9 +48,14 @@ The header is always the first line, even with no accounts. Amounts always have
 
 ### Ledger rules
 
-- Deposit / withdrawal need a positive amount and a tx id not seen before.
-- A withdrawal needs sufficient available funds.
-- A locked account rejects deposits and withdrawals.
+- Deposit / withdrawal need an amount (zero is fine) and a tx id not used before.
+  An identical replay (same client, type and amount) is ignored and counted as a
+  duplicate; the same id with different content is rejected.
+- A withdrawal needs sufficient available funds. A rejected deposit/withdrawal is
+  remembered (`rejected_reason` in `transactions`), so its tx id cannot be reused
+  and it cannot be disputed.
+- A locked account (after a chargeback) rejects deposits and withdrawals. Dispute,
+  resolve and chargeback are still accepted on a locked account.
 - Only deposits can be disputed: dispute moves available → held, resolve moves
   held → available, chargeback removes the held funds and locks the account.
 - Dispute, resolve and chargeback must reference a transaction of the same client,
@@ -59,6 +64,15 @@ The header is always the first line, even with no accounts. Amounts always have
 A rule violation *rejects* the record: it is skipped and reported on stderr as
 `row N: rejected: reason`. Malformed CSV or a database failure is fatal (non-zero
 exit, `error: ...`).
+
+### Redelivery caveat
+
+Deposits and withdrawals carry a unique tx id, so they can be made idempotent
+under at-least-once delivery, and are.
+Dispute, resolve and chargeback rows carry no id of their own, so they **cannot**
+be deduplicated: a redelivered `dispute` that arrives after a `resolve` disputes
+the transaction again. Within a state machine they are only protected by the
+state checks (e.g. a second `chargeback` is rejected because nothing is held).
 
 ## Library
 

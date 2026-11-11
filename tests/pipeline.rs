@@ -112,7 +112,7 @@ const HEADER: &str = "client,available,held,total,locked\n";
     "},
     1
 )]
-#[case::duplicate_tx_ignored(
+#[case::identical_replay_ignored(
     indoc! {"
         type,client,tx,amount
         deposit,1,1,2.0
@@ -120,6 +120,52 @@ const HEADER: &str = "client,available,held,total,locked\n";
     "},
     indoc! {"
         1,2.0000,0.0000,2.0000,false
+    "},
+    0
+)]
+#[case::conflicting_duplicate_rejected(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        deposit,1,1,5.0
+        deposit,2,1,2.0
+    "},
+    indoc! {"
+        1,2.0000,0.0000,2.0000,false
+    "},
+    2
+)]
+#[case::rejected_withdrawal_keeps_tx_id_taken(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,1.0
+        withdrawal,1,2,5.0
+        deposit,1,2,1.0
+    "},
+    indoc! {"
+        1,1.0000,0.0000,1.0000,false
+    "},
+    2
+)]
+#[case::rejected_tx_is_not_disputable(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,1.0
+        withdrawal,1,2,5.0
+        dispute,1,2,
+    "},
+    indoc! {"
+        1,1.0000,0.0000,1.0000,false
+    "},
+    2
+)]
+#[case::missing_amount_rejected(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,
+    "},
+    indoc! {"
+        1,0.0000,0.0000,0.0000,false
     "},
     1
 )]
@@ -135,19 +181,46 @@ const HEADER: &str = "client,available,held,total,locked\n";
     "},
     0
 )]
-#[case::zero_amount_rejected(
+#[case::zero_amount_accepted(
     indoc! {"
         type,client,tx,amount
         deposit,1,1,0
+        withdrawal,1,2,0.0
     "},
-    "",
-    1
+    indoc! {"
+        1,0.0000,0.0000,0.0000,false
+    "},
+    0
 )]
 #[tokio::test]
 async fn processes(#[case] input: &str, #[case] rows: &str, #[case] rejected: u64) {
     let (out, rej) = run(input).await;
     assert_report_eq(&out, &format!("{HEADER}{rows}"));
     assert_eq!(rej, rejected);
+}
+
+#[tokio::test]
+async fn replays_are_counted_as_duplicates_not_rejections() {
+    let store = Store::in_memory().await.unwrap();
+    let summary = process(
+        indoc! {"
+            type,client,tx,amount
+            deposit,1,1,2.0
+            deposit,1,1,2.0
+            withdrawal,1,2,9.0
+            withdrawal,1,2,9.0
+        "}
+        .as_bytes(),
+        &store,
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    // The rejected withdrawal is remembered, so its replay is a duplicate too.
+    assert_eq!(
+        (summary.applied, summary.duplicates, summary.rejected),
+        (1, 2, 1)
+    );
 }
 
 #[rstest]

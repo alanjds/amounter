@@ -2,15 +2,22 @@
 //!
 //! Each record runs in its own database transaction that locks the client's
 //! account row (`SELECT … FOR UPDATE` on PostgreSQL), so concurrent writers
-//! for the same client are serialized and no balance update is lost. A record
-//! rejected by a rule rolls back and leaves no trace.
+//! for the same client are serialized and no balance update is lost.
+//!
+//! A dispute-family record rejected by a rule rolls back and leaves no trace. A
+//! deposit/withdrawal rejected by a rule is kept as a tombstone row in
+//! `transactions` (with `rejected_reason` set, balances untouched), so its tx id
+//! stays taken.
 //!
 //! Rules:
-//! - Deposits/withdrawals need a positive amount and a unique tx id.
+//! - Deposits/withdrawals need an amount (zero is fine) and an unused tx id. A
+//!   replay of an identical, already-seen deposit/withdrawal is an ignored
+//!   [`Outcome::Duplicate`]; the same id with different content is rejected.
 //! - Withdrawals need sufficient *available* funds.
 //! - Locked accounts reject deposits and withdrawals.
 //! - Only deposits can be disputed (available -> held), resolved
-//!   (held -> available) or charged back (held removed, account locked).
+//!   (held -> available) or charged back (held removed, account locked). Rejected
+//!   deposits/withdrawals are not real transactions and cannot be disputed.
 //! - Dispute-family records must reference a tx belonging to the same client.
 
 use sea_orm::{
@@ -27,16 +34,36 @@ use crate::{
     model::{Kind, Record},
 };
 
-/// Outcome of applying one record: `Ok(Ok(()))` applied, `Ok(Err(_))` rejected
-/// by a business rule, `Err(_)` fatal.
-pub type Applied = Result<std::result::Result<(), Rejection>>;
+/// What happened to a record that broke no rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The record changed the ledger.
+    Applied,
+    /// An identical deposit/withdrawal was already seen; ignored (at-least-once
+    /// delivery).
+    Duplicate,
+}
+
+/// Result of applying one record: `Ok(Ok(_))` accepted, `Ok(Err(_))` rejected by
+/// a business rule, `Err(_)` fatal.
+pub type Applied = Result<std::result::Result<Outcome, Rejection>>;
+
+/// How a transaction that reached its end (and so is committed) finished.
+enum Step {
+    Done(Outcome),
+    /// A deposit/withdrawal rejected by a rule; its tombstone row is committed.
+    Rejected(Rejection),
+}
 
 pub async fn apply(store: &Store, rec: &Record) -> Applied {
     let txn = store.db().begin().await?;
     match apply_in(&txn, rec).await {
-        Ok(()) => {
+        Ok(step) => {
             txn.commit().await?;
-            Ok(Ok(()))
+            Ok(match step {
+                Step::Done(outcome) => Ok(outcome),
+                Step::Rejected(reason) => Err(reason),
+            })
         }
         Err(Failure::Rejected(r)) => {
             txn.rollback().await?;
@@ -69,7 +96,7 @@ fn sub(a: Amount, b: Amount) -> std::result::Result<Amount, Rejection> {
     a.checked_sub(b).ok_or(Rejection::Overflow)
 }
 
-async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Result<(), Failure> {
+async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Result<Step, Failure> {
     let client = i32::from(rec.client);
     let tx_id = i64::from(rec.tx);
 
@@ -92,38 +119,53 @@ async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Resul
 
     match rec.kind {
         Kind::Deposit | Kind::Withdrawal => {
-            let amount = rec
-                .amount
-                .filter(|a| a.is_positive())
-                .ok_or(Rejection::InvalidAmount)?;
-            if acct.locked {
-                return Err(Rejection::AccountLocked.into());
-            }
             let kind = if rec.kind == Kind::Deposit {
                 TxKind::Deposit
             } else {
                 TxKind::Withdrawal
             };
+            let rejection = match rec.amount {
+                None => Some(Rejection::InvalidAmount),
+                Some(_) if acct.locked => Some(Rejection::AccountLocked),
+                Some(a) if kind == TxKind::Withdrawal && acct.available < a => {
+                    Some(Rejection::InsufficientFunds)
+                }
+                Some(a) if kind == TxKind::Deposit && add(acct.available, a).is_err() => {
+                    Some(Rejection::Overflow)
+                }
+                Some(_) => None,
+            };
+            let amount = rec.amount.unwrap_or(Amount::ZERO);
             // The primary key makes tx ids unique even across concurrent writers.
+            // Rejected records are stored too (with their reason) so the id stays
+            // taken.
             let inserted = transaction::Entity::insert(transaction::ActiveModel {
                 tx: Set(tx_id),
                 client: Set(client),
                 kind: Set(kind),
                 amount: Set(amount),
                 state: Set(TxState::Normal),
+                rejected_reason: Set(rejection.map(|r| format!("{r:?}"))),
             })
             .on_conflict_do_nothing()
             .exec(txn)
             .await?;
             if matches!(inserted, TryInsertResult::Conflicted) {
-                return Err(Rejection::DuplicateTx.into());
+                let seen = transaction::Entity::find_by_id(tx_id).one(txn).await?;
+                let replay = seen
+                    .is_some_and(|t| t.client == client && t.kind == kind && t.amount == amount);
+                return if replay {
+                    Ok(Step::Done(Outcome::Duplicate))
+                } else {
+                    Err(Rejection::DuplicateTx.into())
+                };
+            }
+            if let Some(reason) = rejection {
+                return Ok(Step::Rejected(reason));
             }
             if kind == TxKind::Deposit {
                 acct.available = add(acct.available, amount)?;
             } else {
-                if acct.available < amount {
-                    return Err(Rejection::InsufficientFunds.into());
-                }
                 acct.available = sub(acct.available, amount)?;
             }
         }
@@ -131,7 +173,7 @@ async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Resul
             let stored = transaction::Entity::find_by_id(tx_id)
                 .one(txn)
                 .await?
-                .filter(|t| t.client == client)
+                .filter(|t| t.client == client && t.rejected_reason.is_none())
                 .ok_or(Rejection::UnknownTx)?;
             let new_state = match rec.kind {
                 Kind::Dispute => {
@@ -180,5 +222,5 @@ async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Resul
     }
     .update(txn)
     .await?;
-    Ok(())
+    Ok(Step::Done(Outcome::Applied))
 }

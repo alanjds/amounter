@@ -44,8 +44,11 @@ async fn run(cli: Cli) -> amounter::Result<()> {
         }
     })
     .await?;
-    if !cli.quiet && summary.rejected > 0 {
-        eprintln!("{} applied, {} rejected", summary.applied, summary.rejected);
+    if !cli.quiet && (summary.rejected > 0 || summary.duplicates > 0) {
+        eprintln!(
+            "{} applied, {} duplicate, {} rejected",
+            summary.applied, summary.duplicates, summary.rejected
+        );
     }
 
     let mut out = BufWriter::new(io::stdout());

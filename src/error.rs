@@ -17,9 +17,9 @@ pub enum Error {
 /// reported, and processing carries on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum Rejection {
-    #[error("deposit/withdrawal without a positive amount")]
+    #[error("deposit/withdrawal without an amount")]
     InvalidAmount,
-    #[error("duplicate transaction id")]
+    #[error("transaction id already used by a different transaction")]
     DuplicateTx,
     #[error("account is locked")]
     AccountLocked,

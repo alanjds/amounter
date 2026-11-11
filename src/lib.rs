@@ -16,6 +16,7 @@ pub mod model;
 pub mod store;
 
 pub use amount::Amount;
+pub use engine::Outcome;
 pub use error::{Error, Rejection, Result};
 pub use io::{Summary, process, write_report};
 pub use model::{ClientId, Kind, Record, TxId};

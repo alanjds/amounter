@@ -23,6 +23,8 @@ pub enum TxState {
 }
 
 /// A persisted deposit/withdrawal, kept so later disputes can reference it.
+/// A row with `rejected_reason` set records a rejected attempt: it only keeps
+/// the tx id taken and is never disputable.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "transactions")]
 pub struct Model {
@@ -32,6 +34,8 @@ pub struct Model {
     pub kind: TxKind,
     pub amount: Amount,
     pub state: TxState,
+    /// `None` for an accepted transaction, else the `Rejection` variant name.
+    pub rejected_reason: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
