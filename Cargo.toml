@@ -1,0 +1,17 @@
+[package]
+name = "amounter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "env"] }
+csv-async = { version = "1.3.1", default-features = false, features = ["tokio", "with_serde"] }
+futures-util = "0.3.34"
+sea-orm = { version = "2.0.4", default-features = false, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
+
+[dev-dependencies]
+indoc = "2.0.8"
+rstest = "0.28.0"
