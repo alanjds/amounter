@@ -22,14 +22,14 @@ the Project Owner.
    to normal and can be disputed again; a charged-back one can no longer be
    disputed, resolved or charged back. No tests pin this down yet.
 5. **Zero amounts.** Deposits and withdrawals of `0` are accepted (decided); the
-   client then appears in the report with zeros. Missing amounts are rejected.
+   client then appears in the report with zeros. A missing amount is malformed input (item 10).
 6. **Tx id scope.** Tx ids are globally unique across clients; a deposit or
    withdrawal reusing any earlier id is rejected, even for a different client.
-   A dispute-family row naming another client's tx is rejected.
+   A dispute-like row naming another client's tx is rejected.
 7. **Redelivered rows (at-least-once delivery).** Implemented: a deposit/withdrawal
    replaying an already-seen tx id with the same client, kind and amount is
    accepted and ignored (idempotent no-op, counted separately from rejections);
-   the same id with different content stays a rejection (conflict). Dispute-family
+   the same id with different content stays a rejection (conflict). Dispute-like
    rows carry no id of their own, so they cannot be deduplicated in general (a
    redelivered `dispute` after a `resolve` would dispute again).
 8. **Rejected transactions keep their tx id.** Implemented: a rejected
@@ -45,12 +45,12 @@ the Project Owner.
 9. **Unknown `type` is fatal.** An unknown type, negative amount or unparsable
    client aborts the run. Alternative: skip and report the row like a rule
    rejection. Fatal was chosen so bad data is not silently dropped.
-10. **Missing amount on deposit/withdrawal.** Today a rule rejection
-    (`InvalidAmount`), which also claims the tx id. Decided (not yet implemented):
-    treat it as malformed input, a decode error in the CSV adapter, not a business
-    rule. Defaulting to 0 was rejected: a truncated row would become a zero
-    deposit that takes the tx id, and the correct redelivery would then be
-    rejected as a conflicting duplicate. An explicit `0` stays valid.
+10. **Missing amount on deposit/withdrawal.** Implemented: it is
+    malformed input, a fatal decode error in the CSV adapter (`row N: deposit
+    without an amount`), not a business rule. It used to be a rule rejection
+    (`InvalidAmount`) that also claimed the tx id. Defaulting to 0 was rejected:
+    a truncated row would become a zero deposit that takes the tx id, and the
+    correct redelivery would then be rejected as a conflicting duplicate. An explicit `0` stays valid.
 11. **A malformed row aborts the run but is not atomic.** Rows are applied as they
     stream, so rows before the bad one stay committed and the run exits non-zero.
     Decided: prefer throughput (batching) over early error detection, so with
@@ -88,7 +88,10 @@ the Project Owner.
     batch must be retried or bisected, and row locks are held longer. Stress runs
     (examples/gen_load.rs) show ~22k rows/s uncontended on in-memory SQLite, i.e.
     days for a full u32-range input; the in-memory backend also keeps every tx
-    (~23 bytes/row) in RAM.
+    (~23 bytes/row) in RAM. Only `pipeline::ingest` knows the transaction size, so
+    batching changes that one function (`apply` already nests as a savepoint inside
+    an outer transaction). Batches hold several account locks until commit: see
+    item 23.
 15. **No migrations.** Tables are created with `IF NOT EXISTS`.
 16. **Output order is unspecified**; fine for the spec, but sort before diffing
     two runs.
@@ -118,3 +121,26 @@ the Project Owner.
 20. **Per-record span cost.** The `record` span (TRACE) sits in the hot loop.
     Disabled at the default filter it showed no measurable cost on 1M rows, but its
     cost when enabled (and with an OTEL layer) at billions of rows is unmeasured.
+
+## Architecture
+
+21. **Rejected operations still roll back (deferred).** A rejected dispute-like
+    row, and a conflicting duplicate id from a brand-new client, are undone by
+    rolling back their database transaction (that is what removes the account row
+    inserted up front). The alternative ("every operation commits": the dispute
+    family looks the account up without inserting it, and a conflicting duplicate
+    deletes an account row it just created) removes the need for savepoints once
+    batching exists and gives an audit journal a single hook. It is deferred
+    because the delete-if-inserted case is unverified on Postgres (a concurrent
+    first insert for the same client). Revisit together with batching (item 14)
+    and the audit trail (item 22), with a Postgres test first.
+22. **Audit trail.** The database holds only current state, so a crash, bug or
+    manual edit cannot be audited. Investigated: an append-only journal with a
+    sequence number (one row per input record, with a stable outcome code), a
+    `runs` table, and a replay-based `verify`; a first `verify` that needs no
+    schema change is possible now. Per-row before/after totals add bytes but no
+    information over the journal. Not started; the refactor keeps a seam for it.
+23. **Postgres batch deadlocks.** With batching, one transaction holds several
+    client row locks. Options: lock clients in sorted order, retry the whole
+    batch on deadlock (40P01/40001), shard streams by client, or a combination.
+    Undecided; irrelevant while each operation commits on its own.

@@ -6,7 +6,7 @@
 //!
 //! Profiles: `sequential` (deposits, tx 1..), `sparse` (deposits, tx ids
 //! scrambled over the whole u32 range), `mixed` (70% deposit / 20% withdrawal /
-//! 10% dispute-family), `dup-heavy` (sparse deposits, ~10% repeated tx ids).
+//! 10% dispute-like), `dup-heavy` (sparse deposits, ~10% repeated tx ids).
 //!
 //! `--whitespace` pads fields (`type, client, tx, amount`), varies amount
 //! precision from 0 to 4 decimals and adds stray trailing spaces.
