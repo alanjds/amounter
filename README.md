@@ -33,8 +33,9 @@ dispute, 1, 1
 - Columns: `type,client,tx,amount`. Whitespace around fields is ignored.
 - `type`: `deposit`, `withdrawal`, `dispute`, `resolve`, `chargeback`.
 - `client` is a `u16`, `tx` a `u32`.
-- `amount` is an unsigned decimal with up to 4 decimal places. Dispute-family rows
-  may leave it empty or omit the field.
+- `amount` is an unsigned decimal with up to 4 decimal places, required on
+  `deposit` and `withdrawal` (zero is fine). Dispute-like rows may leave it empty
+  or omit the field; an amount given there is ignored.
 
 ### Output
 
@@ -49,7 +50,7 @@ The header is always the first line, even with no accounts. Amounts always have
 
 ### Ledger rules
 
-- Deposit / withdrawal need an amount (zero is fine) and a tx id not used before.
+- Deposit / withdrawal carry an amount (zero is fine) and need a tx id not used before.
   An identical replay (same client, type and amount) is ignored and counted as a
   duplicate; the same id with different content is rejected.
 - A withdrawal needs sufficient available funds. A rejected deposit/withdrawal is
@@ -67,7 +68,7 @@ The header is always the first line, even with no accounts. Amounts always have
   in the right state.
 
 A rule violation *rejects* the record: it is skipped and reported on stderr as
-a `WARN` log line with `row` and `reason` (see [Logging](#logging)). Malformed CSV or a database
+a `WARN` log line with `row` and `reason` (see [Logging](#logging)). Malformed CSV, a deposit/withdrawal without an amount, or a database
 failure is fatal (non-zero exit, logged as `ERROR`).
 
 ### Redelivery caveat
@@ -97,26 +98,40 @@ With `LOG_FORMAT=json`:
 
 ## Library
 
+Three independent stages, each a lazy `Stream`:
+
 ```rust
-use amounter::{Store, process, write_report};
+use amounter::{Store, Outcome, entity::account, format::csv, pipeline};
+use futures_util::TryStreamExt;
 
 let store = Store::connect("sqlite://ledger.db?mode=rwc").await?;
-let summary = process(reader, &store, |row, why| tracing::warn!(row, %why, "rejected")).await?;
-write_report(&store, &mut writer).await?;
+let ops = csv::decode(reader);                                     // Stream<(Seq, Operation)>
+let mut outcomes = Box::pin(pipeline::ingest(store.clone(), ops)); // Stream<(Seq, Outcome)>
+let mut tally = pipeline::IngestionReport::default();             // optional
+while let Some((row, outcome)) = outcomes.try_next().await? {
+    tally.record(&outcome);
+    if let Outcome::Rejected(why) = outcome { tracing::warn!(row, %why, "rejected") }
+}
+// Independent of the above (could be another process):
+let summaries = account::Model::summaries(&store).await?;
+csv::encode_report(Box::pin(summaries), &mut writer).await?;
 ```
 
 - The library never installs a logger; install a `tracing` subscriber in your
   binary to see its events.
 - `Store` is cheap to `clone()` (it shares the connection pool).
-- `process` reads one row at a time (memory is independent of input size) and
-  applies each record in its own database transaction, locking the client's
-  account row (`SELECT ... FOR UPDATE`) so concurrent streams on the same client
-  do not lose updates.
-- `write_report` streams accounts from the database; closing the writer is left to
+- `decode` reads one row at a time and `ingest` applies each operation in its own
+  database transaction, locking the client's account row (`SELECT ... FOR UPDATE`),
+  so memory is independent of input size and concurrent streams on the same
+  client do not lose updates. `ingest` alone knows the transaction size.
+- After the first error (malformed row, missing amount, database failure) both
+  streams end without pulling or applying anything else; operations before it
+  stay committed.
+- The report streams accounts from the database; closing the writer is left to
   the caller.
 - Money is a fixed-point `Amount` (integer ten-thousandths); no floats anywhere.
 
-A TCP server is a loop around the same two calls (this sketch compiles):
+A TCP server is a loop around the same stages (this sketch compiles):
 
 ```rust
 let store = Store::connect("sqlite::memory:").await?;
@@ -126,10 +141,14 @@ loop {
     let store = store.clone();
     tokio::spawn(async move {
         let (reader, mut writer) = socket.into_split();
-        process(reader, &store, |row, why| tracing::warn!(row, %why, "rejected")).await?;
-        write_report(&store, &mut writer).await?;
+        let mut outcomes = Box::pin(pipeline::ingest(store.clone(), csv::decode(reader)));
+        while let Some((row, outcome)) = outcomes.try_next().await? {
+            if let Outcome::Rejected(why) = outcome { tracing::warn!(row, %why, "rejected") }
+        }
+        let summaries = account::Model::summaries(&store).await?;
+        csv::encode_report(Box::pin(summaries), &mut writer).await?;
         writer.shutdown().await?;
-        Ok::<_, amounter::Error>(())
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
 }
 ```
@@ -157,11 +176,12 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 | Path | Role |
 | --- | --- |
 | `src/amount.rs` | fixed-point `Amount` |
-| `src/model.rs` | CSV `Record`, `Kind`, id types |
-| `src/entity/` | SeaORM entities (`accounts`, `transactions`) |
+| `src/model.rs` | `Operation`, id types |
+| `src/format/csv.rs` | CSV wire format: `decode`, `encode_report` |
+| `src/entity/` | SeaORM entities (`accounts`, `transactions`) with the ledger rules as methods, the report row `account::Summary` and `Model::summaries` |
 | `src/store.rs` | connection handling, table creation |
-| `src/engine.rs` | ledger rules, one DB transaction per record |
-| `src/io.rs` | `process` and `write_report` |
+| `src/engine.rs` | applies one operation: DB transaction, account lock, rules, save |
+| `src/pipeline.rs` | `ingest` (operations to outcomes) and the run `IngestionReport` |
 | `src/main.rs` | clap CLI |
 | `src/telemetry.rs` | CLI-only `tracing` subscriber setup (text/JSON, filters) |
 | `tests/` | CLI, pipeline and concurrency tests; `common/` shared fixtures |
@@ -174,8 +194,10 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 - **Not atomic on a bad row:** rows are applied as they stream, so a malformed row
   aborts the run (non-zero exit) after the earlier rows are already committed.
   This is deliberate: throughput (batching) is preferred over early error
-  detection, so do not rely on all-or-nothing input handling.
+  detection, so do not rely on all-or-nothing input handling. Operations before the
+  bad row stay committed, and no report is printed.
 - **Schema:** tables are created with `IF NOT EXISTS`; there are no migrations.
 - **SQLite** uses a single connection, so concurrency there is serialized; row
-  locks only matter on Postgres.
+  locks only matter on Postgres. The report stream holds that only connection until
+  it is dropped, so a slow reader stalls other users of the same `Store`.
 - Output order is unspecified.

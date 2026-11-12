@@ -7,7 +7,6 @@ const SCALE: i64 = 10_000;
 const DECIMALS: usize = 4;
 
 /// Fixed-point money with 4 decimal places, stored as integer ten-thousandths.
-/// Avoids floating point rounding entirely.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, DeriveValueType)]
 pub struct Amount(i64);
 
@@ -69,7 +68,7 @@ impl FromStr for Amount {
 }
 
 impl fmt::Display for Amount {
-    /// Always prints 4 decimals, e.g. `1.5000`.
+    /// Always prints 4 decimals.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sign = if self.0 < 0 { "-" } else { "" };
         let abs = self.0.unsigned_abs();

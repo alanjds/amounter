@@ -3,7 +3,12 @@
 //! Each test file is its own crate and uses only some of these.
 #![allow(dead_code)]
 
+use amounter::{
+    IngestionReport, Outcome, Rejection, Seq, Store, entity::account, format::csv, pipeline,
+};
+use futures_util::TryStreamExt;
 use rstest::fixture;
+use tokio::io::{AsyncRead, AsyncWrite};
 use std::{
     io::Write,
     path::PathBuf,
@@ -93,4 +98,32 @@ pub fn run_cli(cmd: &mut Command, stdin: &str) -> CliResult {
         stdout: String::from_utf8(out.stdout).unwrap(),
         stderr: String::from_utf8(out.stderr).unwrap(),
     }
+}
+
+/// Reads a whole CSV input into the store: `decode`, then `pipeline::ingest`.
+/// Rule violations are skipped and passed to `on_reject(row, reason)`; malformed
+/// CSV or a database failure aborts with an error.
+pub async fn ingest<R: AsyncRead + Unpin + Send>(
+    input: R,
+    store: &Store,
+    mut on_reject: impl FnMut(Seq, &Rejection),
+) -> Result<IngestionReport, csv::Error> {
+    let mut outcomes = std::pin::pin!(pipeline::ingest(store.clone(), csv::decode(input)));
+    let mut report = IngestionReport::default();
+    while let Some((row, outcome)) = outcomes.try_next().await? {
+        report.record(&outcome);
+        if let Outcome::Rejected(reason) = outcome {
+            on_reject(row, &reason);
+        }
+    }
+    Ok(report)
+}
+
+/// The account report as CSV: `Model::summaries` into `encode_report`.
+pub async fn write_report<W: AsyncWrite + Unpin + Send>(
+    store: &Store,
+    out: W,
+) -> Result<(), csv::Error> {
+    let summaries = account::Model::summaries(store).await?;
+    csv::encode_report(Box::pin(summaries), out).await
 }

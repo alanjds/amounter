@@ -5,20 +5,16 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// Fatal errors: processing cannot continue.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("csv error: {0}")]
-    Csv(#[from] csv_async::Error),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
     #[error("database error: {0}")]
     Db(#[from] sea_orm::DbErr),
+    #[error("amount overflow")]
+    Overflow,
 }
 
 /// A record that is valid CSV but breaks a business rule. It is skipped and
 /// reported, and processing carries on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error, strum::IntoStaticStr)]
 pub enum Rejection {
-    #[error("deposit/withdrawal without an amount")]
-    InvalidAmount,
     #[error("transaction id already used by a different transaction")]
     DuplicateTx,
     #[error("account is locked")]
@@ -35,4 +31,32 @@ pub enum Rejection {
     NotDisputed,
     #[error("amount overflow")]
     Overflow,
+}
+
+impl Rejection {
+    /// Rejection code persisted in the database
+    pub fn code(&self) -> &'static str {
+        (*self).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// The persisted codes are literals on purpose: renaming a variant must not
+    /// change them.
+    #[rstest]
+    #[case(Rejection::DuplicateTx, "DuplicateTx")]
+    #[case(Rejection::AccountLocked, "AccountLocked")]
+    #[case(Rejection::InsufficientFunds, "InsufficientFunds")]
+    #[case(Rejection::UnknownTx, "UnknownTx")]
+    #[case(Rejection::NotDisputable, "NotDisputable")]
+    #[case(Rejection::AlreadyDisputed, "AlreadyDisputed")]
+    #[case(Rejection::NotDisputed, "NotDisputed")]
+    #[case(Rejection::Overflow, "Overflow")]
+    fn codes_are_stable(#[case] r: Rejection, #[case] code: &str) {
+        assert_eq!(r.code(), code);
+    }
 }

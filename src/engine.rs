@@ -1,226 +1,262 @@
-//! Business rules.
+//! Orchestration of one operation: lock the account, run the rules, save.
+//! The rules themselves are methods on the entity models
+//! ([`account::Model`], [`transaction::Model`]).
 //!
 //! Each record runs in its own database transaction that locks the client's
 //! account row (`SELECT … FOR UPDATE` on PostgreSQL), so concurrent writers
 //! for the same client are serialized and no balance update is lost.
 //!
-//! A dispute-family record rejected by a rule rolls back and leaves no trace. A
+//! A dispute-like record rejected by a rule rolls back and leaves no trace. A
 //! deposit/withdrawal rejected by a rule is kept as a tombstone row in
 //! `transactions` (with `rejected_reason` set, balances untouched), so its tx id
 //! stays taken.
 //!
 //! Rules:
-//! - Deposits/withdrawals need an amount (zero is fine) and an unused tx id. A
-//!   replay of an identical, already-seen deposit/withdrawal is an ignored
+//! - Deposits/withdrawals carry an amount (zero is fine; the decoder rejects a
+//!   missing one) and need an unused tx id.
+//!   A replay of an identical, already-seen deposit/withdrawal is an ignored
 //!   [`Outcome::Duplicate`]; the same id with different content is rejected.
 //! - Withdrawals need sufficient *available* funds.
 //! - Locked accounts reject deposits and withdrawals.
-//! - Only deposits can be disputed (available -> held), resolved
-//!   (held -> available) or charged back (held removed, account locked). Rejected
-//!   deposits/withdrawals are not real transactions and cannot be disputed.
-//! - Dispute-family records must reference a tx belonging to the same client.
+//! - Only real (not rejected) deposits can be disputed, resolved or charged back.
+//! - Dispute-like records must reference a tx belonging to the same client.
 
 use sea_orm::{
-    ActiveModelTrait, DatabaseTransaction, DbErr, EntityTrait, QuerySelect, Set, TransactionTrait,
-    TryInsertResult, Unchanged,
+    ActiveModelTrait, ConnectionTrait, DbErr, EntityTrait, QuerySelect, TransactionSession,
+    TransactionTrait, TryInsertResult,
 };
 
 use crate::{
-    Amount, Error, Rejection, Result, Store,
+    Rejection, Result,
     entity::{
         account,
-        transaction::{self, TxKind, TxState},
+        transaction::{self, TxKind},
     },
-    model::{Kind, Record},
+    model::Operation,
 };
 
-/// What happened to a record that broke no rule.
+/// What happened to an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// The record changed the ledger.
+    /// The operation changed the ledger.
     Applied,
-    /// An identical deposit/withdrawal was already seen; ignored (at-least-once
-    /// delivery).
+    /// Expecting at-lest-once deliveries, which can produce duplicates.
     Duplicate,
-}
-
-/// Result of applying one record: `Ok(Ok(_))` accepted, `Ok(Err(_))` rejected by
-/// a business rule, `Err(_)` fatal.
-pub type Applied = Result<std::result::Result<Outcome, Rejection>>;
-
-/// How a transaction that reached its end (and so is committed) finished.
-enum Step {
-    Done(Outcome),
-    /// A deposit/withdrawal rejected by a rule; its tombstone row is committed.
+    /// A business rule refused it; see the module docs for what is kept.
     Rejected(Rejection),
 }
 
-pub async fn apply(store: &Store, rec: &Record) -> Applied {
-    let txn = store.db().begin().await?;
-    match apply_in(&txn, rec).await {
-        Ok(step) => {
-            txn.commit().await?;
-            Ok(match step {
-                Step::Done(outcome) => Ok(outcome),
-                Step::Rejected(reason) => Err(reason),
-            })
+/// Applies one operation in its own transaction
+///
+/// Rule violations are `Ok(Outcome::Rejected(_))`.
+/// `Err` is fatal, possibly from a database error;
+pub(crate) async fn apply<C: TransactionTrait>(conn: &C, op: &Operation) -> Result<Outcome> {
+    let db = conn.begin().await?;
+    // On `Err` the dropped transaction rolls back.
+    match apply_in(&db, op).await? {
+        Ok(outcome) => {
+            db.commit().await?;
+            Ok(outcome)
         }
-        Err(Failure::Rejected(r)) => {
-            txn.rollback().await?;
-            Ok(Err(r))
+        Err(reason) => {
+            db.rollback().await?;
+            Ok(Outcome::Rejected(reason))
         }
-        // Dropping the transaction rolls it back.
-        Err(Failure::Fatal(e)) => Err(e),
     }
 }
 
-enum Failure {
-    Rejected(Rejection),
-    Fatal(Error),
-}
-impl From<Rejection> for Failure {
-    fn from(r: Rejection) -> Self {
-        Failure::Rejected(r)
-    }
-}
-impl From<DbErr> for Failure {
-    fn from(e: DbErr) -> Self {
-        Failure::Fatal(e.into())
-    }
-}
-
-fn add(a: Amount, b: Amount) -> std::result::Result<Amount, Rejection> {
-    a.checked_add(b).ok_or(Rejection::Overflow)
-}
-fn sub(a: Amount, b: Amount) -> std::result::Result<Amount, Rejection> {
-    a.checked_sub(b).ok_or(Rejection::Overflow)
-}
-
-async fn apply_in(txn: &DatabaseTransaction, rec: &Record) -> std::result::Result<Step, Failure> {
-    let client = i32::from(rec.client);
-    let tx_id = i64::from(rec.tx);
+/// `Ok(Ok(_))`: commit
+///     (including `Outcome::Rejected` from a deposit/withdrawal tombstone).
+/// `Ok(Err(_))`: rejected, the caller must roll back.
+async fn apply_in<T: ConnectionTrait>(
+    db: &T,
+    op: &Operation,
+) -> Result<std::result::Result<Outcome, Rejection>> {
+    let (client, tx_id) = (i32::from(op.client()), i64::from(op.tx()));
 
     // Make sure the row exists, then lock it for the rest of the transaction.
     // Rolling back on rejection removes a row created here.
-    account::Entity::insert(account::ActiveModel {
-        client: Set(client),
-        available: Set(Amount::ZERO),
-        held: Set(Amount::ZERO),
-        locked: Set(false),
-    })
-    .on_conflict_do_nothing()
-    .exec(txn)
-    .await?;
-    let mut acct = account::Entity::find_by_id(client)
+    account::Entity::insert(account::ActiveModel::from(account::Model::new(client)).reset_all())
+        .on_conflict_do_nothing()
+        .exec(db)
+        .await?;
+
+    let mut account = account::Entity::find_by_id(client)
         .lock_exclusive()
-        .one(txn)
+        .one(db)
         .await?
         .ok_or_else(|| DbErr::RecordNotFound(format!("account {client}")))?;
 
-    match rec.kind {
-        Kind::Deposit | Kind::Withdrawal => {
-            let kind = if rec.kind == Kind::Deposit {
-                TxKind::Deposit
-            } else {
-                TxKind::Withdrawal
+    match *op {
+        Operation::Deposit { amount, .. } | Operation::Withdrawal { amount, .. } => {
+            let (kind, outcome) = match *op {
+                Operation::Deposit { .. } => (TxKind::Deposit, account.deposit(amount)),
+                Operation::Withdrawal { .. } => (TxKind::Withdrawal, account.withdraw(amount)),
+                _ => unreachable!("outer matches only deposit or withdrawal"),
             };
-            let rejection = match rec.amount {
-                None => Some(Rejection::InvalidAmount),
-                Some(_) if acct.locked => Some(Rejection::AccountLocked),
-                Some(a) if kind == TxKind::Withdrawal && acct.available < a => {
-                    Some(Rejection::InsufficientFunds)
-                }
-                Some(a) if kind == TxKind::Deposit && add(acct.available, a).is_err() => {
-                    Some(Rejection::Overflow)
-                }
-                Some(_) => None,
-            };
-            let amount = rec.amount.unwrap_or(Amount::ZERO);
-            // The primary key makes tx ids unique even across concurrent writers.
-            // Rejected records are stored too (with their reason) so the id stays
-            // taken.
-            let inserted = transaction::Entity::insert(transaction::ActiveModel {
-                tx: Set(tx_id),
-                client: Set(client),
-                kind: Set(kind),
-                amount: Set(amount),
-                state: Set(TxState::Normal),
-                rejected_reason: Set(rejection.map(|r| format!("{r:?}"))),
-            })
+            let mut stored = transaction::Model::new(tx_id, client, kind, amount);
+            if let Err(reason) = outcome {
+                stored = stored.rejected(reason);
+            }
+
+            // Rejected records stored w/ reason: ids of failures are burnt.
+            let insertion = transaction::Entity::insert(
+                transaction::ActiveModel::from(stored.clone()).reset_all(),
+            )
             .on_conflict_do_nothing()
-            .exec(txn)
+            .exec(db)
             .await?;
-            if matches!(inserted, TryInsertResult::Conflicted) {
-                let seen = transaction::Entity::find_by_id(tx_id).one(txn).await?;
-                let replay = seen
-                    .is_some_and(|t| t.client == client && t.kind == kind && t.amount == amount);
-                return if replay {
-                    Ok(Step::Done(Outcome::Duplicate))
+
+            if matches!(insertion, TryInsertResult::Conflicted) {
+                let existing = transaction::Entity::find_by_id(tx_id).one(db).await?;
+                return Ok(if existing.is_some_and(|tx| tx.is_replay_of(&stored)) {
+                    Ok(Outcome::Duplicate) // Swallowing dupes as "correctly applied before"
                 } else {
-                    Err(Rejection::DuplicateTx.into())
-                };
+                    Err(Rejection::DuplicateTx) // tx_id "reuses" are not dupes. Error it.
+                });
             }
-            if let Some(reason) = rejection {
-                return Ok(Step::Rejected(reason));
-            }
-            if kind == TxKind::Deposit {
-                acct.available = add(acct.available, amount)?;
-            } else {
-                acct.available = sub(acct.available, amount)?;
+            if let Err(why) = outcome {
+                return Ok(Ok(Outcome::Rejected(why)));
             }
         }
-        Kind::Dispute | Kind::Resolve | Kind::Chargeback => {
-            let stored = transaction::Entity::find_by_id(tx_id)
-                .one(txn)
-                .await?
-                .filter(|t| t.client == client && t.rejected_reason.is_none())
-                .ok_or(Rejection::UnknownTx)?;
-            let new_state = match rec.kind {
-                Kind::Dispute => {
-                    if stored.kind != TxKind::Deposit {
-                        return Err(Rejection::NotDisputable.into());
-                    }
-                    if stored.state != TxState::Normal {
-                        return Err(Rejection::AlreadyDisputed.into());
-                    }
-                    acct.available = sub(acct.available, stored.amount)?;
-                    acct.held = add(acct.held, stored.amount)?;
-                    TxState::Disputed
-                }
-                Kind::Resolve => {
-                    if stored.state != TxState::Disputed {
-                        return Err(Rejection::NotDisputed.into());
-                    }
-                    acct.held = sub(acct.held, stored.amount)?;
-                    acct.available = add(acct.available, stored.amount)?;
-                    TxState::Normal
-                }
-                _ => {
-                    if stored.state != TxState::Disputed {
-                        return Err(Rejection::NotDisputed.into());
-                    }
-                    acct.held = sub(acct.held, stored.amount)?;
-                    acct.locked = true;
-                    TxState::ChargedBack
-                }
+        Operation::Dispute { .. } | Operation::Resolve { .. } | Operation::Chargeback { .. } => {
+            let Some(mut stored) = transaction::Entity::find_by_id(tx_id).one(db).await? else {
+                // Found not the transaction this dispute-thing targets
+                return Ok(Err(Rejection::UnknownTx));
             };
-            transaction::ActiveModel {
-                tx: Unchanged(tx_id),
-                state: Set(new_state),
-                ..Default::default()
+            let outcome = match op {
+                Operation::Dispute { .. } => stored.dispute(client)
+                                                    .and_then(|a| account.hold(a)),
+                Operation::Resolve { .. } => stored.resolve(client)
+                                                    .and_then(|a| account.release(a)),
+                &Operation::Chargeback { .. } => stored.chargeback(client)
+                                                       .and_then(|a| account.chargeback(a)),
+                _ => unreachable!("outer matches only Dispute, Resolve or Chargeback"),
+            };
+            if let Err(reason) = outcome {
+                return Ok(Err(reason));
             }
-            .update(txn)
-            .await?;
+            transaction::ActiveModel::from(stored)
+                .reset_all()
+                .update(db)
+                .await?;
         }
     }
 
-    account::ActiveModel {
-        client: Unchanged(client),
-        available: Set(acct.available),
-        held: Set(acct.held),
-        locked: Set(acct.locked),
+    account::ActiveModel::from(account)
+        .reset_all()
+        .update(db)
+        .await?;
+    Ok(Ok(Outcome::Applied))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+    use Operation::*;
+
+    const A: crate::Amount = crate::Amount::from_raw(10_000);
+
+    #[tokio::test]
+    async fn apply_returns_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        for (op, want) in [
+            (
+                Deposit {
+                    client: 1,
+                    tx: 1,
+                    amount: A,
+                },
+                Outcome::Applied,
+            ),
+            (
+                Deposit {
+                    client: 1,
+                    tx: 1,
+                    amount: A,
+                },
+                Outcome::Duplicate,
+            ),
+            (
+                Deposit {
+                    client: 1,
+                    tx: 1,
+                    amount: crate::Amount::ZERO,
+                },
+                Outcome::Rejected(Rejection::DuplicateTx),
+            ),
+            (
+                Dispute { client: 1, tx: 9 },
+                Outcome::Rejected(Rejection::UnknownTx),
+            ),
+            (
+                Withdrawal {
+                    client: 1,
+                    tx: 2,
+                    amount: crate::Amount::from_raw(20_000),
+                },
+                Outcome::Rejected(Rejection::InsufficientFunds),
+            ),
+            (Dispute { client: 1, tx: 1 }, Outcome::Applied),
+            (Chargeback { client: 1, tx: 1 }, Outcome::Applied),
+            (
+                Deposit {
+                    client: 1,
+                    tx: 3,
+                    amount: A,
+                },
+                Outcome::Rejected(Rejection::AccountLocked),
+            ),
+        ] {
+            assert_eq!(apply(store.db(), &op).await.unwrap(), want, "{op:?}");
+        }
     }
-    .update(txn)
-    .await?;
-    Ok(Step::Done(Outcome::Applied))
+
+    /// A nested `begin` is a savepoint: a rolled-back rejection leaves no trace
+    /// inside an outer transaction, while the rest of it commits.
+    async fn outer_transaction_keeps_savepoints(store: &Store) {
+        let outer = store.db().begin().await.unwrap();
+        let rejected = apply(&outer, &Dispute { client: 5, tx: 1 }).await.unwrap();
+        assert_eq!(rejected, Outcome::Rejected(Rejection::UnknownTx));
+        let applied = apply(
+            &outer,
+            &Deposit {
+                client: 1,
+                tx: 1,
+                amount: A,
+            },
+        )
+        .await;
+        assert_eq!(applied.unwrap(), Outcome::Applied);
+        // SQLite has one connection: commit before reading.
+        outer.commit().await.unwrap();
+        let clients: Vec<_> = account::Entity::find()
+            .all(store.db())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.client)
+            .collect();
+        assert_eq!(clients, [1]);
+    }
+
+    #[tokio::test]
+    async fn apply_inside_an_outer_transaction() {
+        outer_transaction_keeps_savepoints(&Store::in_memory().await.unwrap()).await;
+    }
+
+    /// Same, on Postgres, when `AMOUNTER_TEST_POSTGRES` is set (scratch database).
+    #[tokio::test]
+    async fn apply_inside_an_outer_transaction_postgres() {
+        let Ok(url) = std::env::var("AMOUNTER_TEST_POSTGRES") else {
+            return;
+        };
+        let db = sea_orm::Database::connect(&url).await.unwrap();
+        let store = Store::from_connection(db.clone()).await.unwrap();
+        db.execute_unprepared("TRUNCATE accounts, transactions")
+            .await
+            .unwrap();
+        outer_transaction_keeps_savepoints(&store).await;
+    }
 }

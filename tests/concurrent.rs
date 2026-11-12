@@ -1,7 +1,12 @@
 //! Several independent streams sharing one `Store`, as a TCP server would.
 
-use amounter::{Store, process, write_report};
+use amounter::{
+    Store,
+};
 use indoc::indoc;
+
+mod common;
+use common::{ingest, write_report};
 
 const CSV_HEADER: &str = "type,client,tx,amount\n";
 
@@ -25,7 +30,7 @@ async fn concurrent_streams_on_same_client_lose_no_updates() {
             let store = store.clone();
             tokio::spawn(async move {
                 let csv = deposits(k * 100, 25, 1);
-                process(csv.as_bytes(), &store, |_, _| {}).await.unwrap()
+                ingest(csv.as_bytes(), &store, |_, _| {}).await.unwrap()
             })
         })
         .collect();
@@ -50,8 +55,8 @@ async fn tx_ids_are_unique_across_streams() {
     let a = deposits(1, 10, 1);
     let b = deposits(1, 10, 2); // same tx ids, different client
     let (ra, rb) = tokio::join!(
-        process(a.as_bytes(), &store, |_, _| {}),
-        process(b.as_bytes(), &store, |_, _| {}),
+        ingest(a.as_bytes(), &store, |_, _| {}),
+        ingest(b.as_bytes(), &store, |_, _| {}),
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
     assert_eq!(ra.applied + rb.applied, 10);
@@ -68,10 +73,10 @@ async fn postgres_concurrent_streams_lose_no_updates() {
         eprintln!("skipped: AMOUNTER_TEST_POSTGRES not set");
         return;
     };
-    let store = Store::connect(&url).await.unwrap();
-    store
-        .db()
-        .execute_unprepared("TRUNCATE accounts, transactions")
+    // `from_connection` creates the tables; only then can they be truncated.
+    let db = sea_orm::Database::connect(&url).await.unwrap();
+    let store = Store::from_connection(db.clone()).await.unwrap();
+    db.execute_unprepared("TRUNCATE accounts, transactions")
         .await
         .unwrap();
 
@@ -85,7 +90,7 @@ async fn postgres_concurrent_streams_lose_no_updates() {
                     deposit_rows(k * 1000, 50, 1),
                     deposit_rows(k * 1000 + 500, 50, 10 + k as u16),
                 );
-                process(csv.as_bytes(), &store, |_, _| {}).await.unwrap()
+                ingest(csv.as_bytes(), &store, |_, _| {}).await.unwrap()
             })
         })
         .collect();

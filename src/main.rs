@@ -2,8 +2,11 @@ use std::{path::PathBuf, process::ExitCode};
 
 mod telemetry;
 
-use amounter::{Store, process, write_report};
+use amounter::{
+    IngestionReport, Outcome, Store, entity::account, format::csv, pipeline::{self},
+};
 use clap::Parser;
+use futures_util::TryStreamExt;
 use telemetry::LogFormat;
 use tokio::{
     fs::File,
@@ -17,13 +20,10 @@ use tracing::Instrument;
 #[command(version, about)]
 struct Cli {
     /// Input CSV (columns: type,client,tx,amount). Use `-` or `--` for stdin.
-    ///
-    /// clap consumes a bare `--` as its end-of-options marker, so it arrives
-    /// here as "no input given", which also means stdin (like `cat`).
     input: Option<PathBuf>,
 
     /// Database URL, e.g. `sqlite://ledger.db?mode=rwc` or `postgres://user:pw@host/db`.
-    /// Defaults to a throwaway in-memory SQLite database.
+    /// Defaults to an in-memory SQLite database.
     #[arg(long, value_name = "URL", env = "DATABASE_URL")]
     database_url: Option<String>,
 
@@ -37,7 +37,7 @@ struct Cli {
     log_format: LogFormat,
 }
 
-async fn run(cli: Cli) -> amounter::Result<()> {
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let input: Box<dyn AsyncRead + Send + Unpin> = match &cli.input {
         Some(path) if path.as_os_str() != "-" => Box::new(File::open(path).await?),
         _ => Box::new(io::stdin()),
@@ -47,16 +47,35 @@ async fn run(cli: Cli) -> amounter::Result<()> {
         None => Store::in_memory().await?,
     };
 
-    let summary = process(input, &store, |row, reason| {
-        tracing::warn!(row, reason = %reason, "rejected");
-    })
+    // Stage 1 decodes, stage 2 applies; both are lazy and run in lockstep.
+    let operations = csv::decode(input);
+    let mut outcomes = Box::pin(pipeline::ingest(store.clone(), operations));
+    let mut injestion = IngestionReport::default();
+    async {
+        while let Some((row, outcome)) = outcomes.try_next().await? {
+            injestion.record(&outcome);
+            if let Outcome::Rejected(reason) = outcome {
+                tracing::warn!(row, reason = %reason, "rejected");
+            }
+        }
+        Ok::<_, csv::Error>(())
+    }
+    .instrument(tracing::info_span!("ingest"))
     .await?;
-    let (applied, duplicates, rejected) = (summary.applied, summary.duplicates, summary.rejected);
-    tracing::info!(applied, duplicates, rejected, "done");
+    tracing::info!(
+        applied = injestion.applied,
+        duplicates = injestion.duplicates,
+        rejected = injestion.rejected,
+        "done"
+    );
 
-    let mut out = BufWriter::new(io::stdout());
-    write_report(&store, &mut out).await?;
-    out.shutdown().await?;
+    // Stage 3 is independent of the ingest above.
+    let mut stdout = BufWriter::new(io::stdout());
+    let summaries = account::Model::summaries(&store).await?;
+    csv::encode_report(Box::pin(summaries), &mut stdout)
+        .instrument(tracing::info_span!("write_report"))
+        .await?;
+    stdout.shutdown().await?;
     Ok(())
 }
 

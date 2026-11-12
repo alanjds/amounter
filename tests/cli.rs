@@ -80,3 +80,51 @@ fn processes_fixture_file() {
         result.stderr
     );
 }
+
+#[test]
+fn missing_amount_is_fatal() {
+    let result = run_cli(
+        bin().arg("-"),
+        indoc! {"
+            type,client,tx,amount
+            deposit,1,1,
+        "},
+    );
+    assert!(!result.success);
+    assert!(result.stderr.contains("ERROR"), "{}", result.stderr);
+    assert!(result.stderr.contains("amount"), "{}", result.stderr);
+    assert_eq!(result.stdout, "");
+}
+
+/// Not atomic, and no report on a fatal error: rows before the bad one stay.
+#[rstest]
+fn decode_error_keeps_earlier_rows_and_prints_no_report(temp_db: TempDb) {
+    let url = temp_db.url();
+    let failed = run_cli(
+        bin().arg("-").env("DATABASE_URL", &url),
+        indoc! {"
+            type,client,tx,amount
+            deposit,1,1,1.0
+            bogus,1,2,1.0
+        "},
+    );
+    assert!(!failed.success);
+    assert_eq!(failed.stdout, "");
+    assert!(failed.stderr.contains("ERROR"), "{}", failed.stderr);
+
+    let next = run_cli(
+        bin().arg("-").env("DATABASE_URL", &url),
+        indoc! {"
+            type,client,tx,amount
+            deposit,1,2,1.0
+        "},
+    );
+    assert!(next.success);
+    assert_eq!(
+        next.stdout,
+        indoc! {"
+            client,available,held,total,locked
+            1,2.0000,0.0000,2.0000,false
+        "}
+    );
+}
