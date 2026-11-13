@@ -1,9 +1,6 @@
 //! End-to-end checks of the lib pipeline (CSV in -> CSV out) over in-memory SQLite.
 
-use amounter::{
-    Store,
-    entity::account,
-};
+use amounter::{Store, entity::account};
 use futures_util::TryStreamExt;
 use indoc::indoc;
 use rstest::rstest;

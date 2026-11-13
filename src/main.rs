@@ -3,7 +3,10 @@ use std::{path::PathBuf, process::ExitCode};
 mod telemetry;
 
 use amounter::{
-    IngestionReport, Outcome, Store, entity::account, format::csv, pipeline::{self},
+    IngestionReport, Outcome, Store,
+    entity::account,
+    format::csv,
+    pipeline::{self},
 };
 use clap::Parser;
 use futures_util::TryStreamExt;

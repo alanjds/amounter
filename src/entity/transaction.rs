@@ -61,9 +61,7 @@ impl Model {
 
     /// An at-least-once redelivery: same client, kind and amount.
     pub fn is_replay_of(&self, other: &Model) -> bool {
-        self.client == other.client
-            && self.kind == other.kind
-            && self.amount == other.amount
+        self.client == other.client && self.kind == other.kind && self.amount == other.amount
     }
 
     /// Only an accepted transaction of this client can be referenced.

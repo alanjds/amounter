@@ -1,8 +1,6 @@
 //! Several independent streams sharing one `Store`, as a TCP server would.
 
-use amounter::{
-    Store,
-};
+use amounter::Store;
 use indoc::indoc;
 
 mod common;

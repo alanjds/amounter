@@ -8,13 +8,13 @@ use amounter::{
 };
 use futures_util::TryStreamExt;
 use rstest::fixture;
-use tokio::io::{AsyncRead, AsyncWrite};
 use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A scratch SQLite database file, deleted (with its WAL sidecars) on drop,
 /// even when the test panics.

@@ -125,12 +125,13 @@ async fn apply_in<T: ConnectionTrait>(
                 return Ok(Err(Rejection::UnknownTx));
             };
             let outcome = match op {
-                Operation::Dispute { .. } => stored.dispute(client)
-                                                    .and_then(|a| account.hold(a)),
-                Operation::Resolve { .. } => stored.resolve(client)
-                                                    .and_then(|a| account.release(a)),
-                &Operation::Chargeback { .. } => stored.chargeback(client)
-                                                       .and_then(|a| account.chargeback(a)),
+                Operation::Dispute { .. } => stored.dispute(client).and_then(|a| account.hold(a)),
+                Operation::Resolve { .. } => {
+                    stored.resolve(client).and_then(|a| account.release(a))
+                }
+                &Operation::Chargeback { .. } => stored
+                    .chargeback(client)
+                    .and_then(|a| account.chargeback(a)),
                 _ => unreachable!("outer matches only Dispute, Resolve or Chargeback"),
             };
             if let Err(reason) = outcome {
