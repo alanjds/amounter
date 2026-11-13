@@ -128,3 +128,55 @@ fn decode_error_keeps_earlier_rows_and_prints_no_report(temp_db: TempDb) {
         "}
     );
 }
+
+/// Changes the database behind the binary's back.
+fn edit(url: &str, change: impl AsyncFnOnce(&sea_orm::DatabaseConnection)) {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let db = sea_orm::Database::connect(url).await.unwrap();
+        change(&db).await;
+        db.close().await.unwrap();
+    });
+}
+
+#[rstest]
+fn verify_is_silent_when_clean_and_prints_each_discrepancy(temp_db: TempDb) {
+    use amounter::entity::account;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+    let url = temp_db.url();
+    let ingest = run_cli(
+        bin().arg("-").env("DATABASE_URL", &url),
+        indoc! {"
+            type,client,tx,amount
+            deposit,1,1,2.0
+            dispute,1,1,
+        "},
+    );
+    assert!(ingest.success, "{}", ingest.stderr);
+    let verify = || run_cli(bin().arg("verify").env("DATABASE_URL", &url), "");
+    let clean = verify();
+    assert!(clean.success, "{}", clean.stderr);
+    assert_eq!((clean.stdout.as_str(), clean.stderr.as_str()), ("", ""));
+
+    edit(&url, async |db| {
+        let edited = account::ActiveModel {
+            client: Set(1),
+            held: Set(amounter::Amount::ZERO),
+            ..Default::default()
+        };
+        edited.update(db).await.unwrap();
+    });
+    let r = verify();
+    assert!(!r.success);
+    assert_eq!(
+        r.stdout,
+        "accounts client 1: held should be 2.0000, is 0.0000\n"
+    );
+    assert!(r.stderr.contains("1 discrepancies"), "{}", r.stderr);
+}
+
+#[test]
+fn a_subcommand_takes_no_input() {
+    let r = run_cli(bin().args(["file.csv", "verify"]), "");
+    assert!(!r.success);
+    assert!(r.stderr.contains("cannot be used with"), "{}", r.stderr);
+}

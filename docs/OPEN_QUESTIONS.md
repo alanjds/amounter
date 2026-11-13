@@ -134,12 +134,31 @@ the Project Owner.
     because the delete-if-inserted case is unverified on Postgres (a concurrent
     first insert for the same client). Revisit together with batching (item 14)
     and the audit trail (item 22), with a Postgres test first.
-22. **Audit trail.** The database holds only current state, so a crash, bug or
-    manual edit cannot be audited. Investigated: an append-only journal with a
-    sequence number (one row per input record, with a stable outcome code), a
-    `runs` table, and a replay-based `verify`; a first `verify` that needs no
-    schema change is possible now. Per-row before/after totals add bytes but no
-    information over the journal. Not started; the refactor keeps a seam for it.
+22. **Audit trail.** Implemented, minimal (README, "Audit journal"): an
+    append-only `journal` table in the same database, one row per committed
+    change (applied operations and tombstones) with the account right after it,
+    written by the engine in the same transaction under the account lock.
+    `verify` checks the rows' continuity by the account rules (memory
+    O(clients)) and the live `accounts` against the last rows, printing one line
+    per discrepancy. No migrations, triggers, runs, digests or rebuild. Left out
+    on purpose, in the order I would add them:
+    - **Transactions.** `verify` does not look at `transactions`. A replay of the
+      journal through all the rules (memory O(transactions)) would compare them,
+      and could back a `rebuild` of both tables.
+    - **Hash chain.** Continuity does not detect a consistent rewrite of a
+      client's rows from some point to the end, or a deleted row that changes no
+      balance (tombstone, zero amount, a dispute with its resolve). Chaining each
+      row to the previous row's hash (and publishing the head out of band) is
+      the next step.
+    - **Snapshots / tail replay.** A periodic checkpoint of the tables would
+      bound a replay to the tail.
+    - **Another store.** The journal shares the database (and its failure and
+      access domain) with the tables; shipping it elsewhere (another database,
+      append-only object storage) would make it independent evidence.
+    - **Rolled-back rejections** are not journaled (item 21), so the journal is
+      not a full input log; "every operation commits" would give them a row.
+    - **Pre-journal databases** have history the journal does not hold: `verify`
+      reports it; no marker tells them apart.
 23. **Postgres batch deadlocks.** With batching, one transaction holds several
     client row locks. Options: lock clients in sorted order, retry the whole
     batch on deadlock (40P01/40001), shard streams by client, or a combination.

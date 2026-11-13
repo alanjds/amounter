@@ -16,6 +16,7 @@ amounter --database-url 'sqlite://ledger.db?mode=rwc' transactions.csv
 DATABASE_URL=postgres://user:pw@host/db amounter transactions.csv
 RUST_LOG=error amounter transactions.csv         # only errors on stderr (no rejection lines)
 LOG_FORMAT=json amounter transactions.csv      # structured logs on stderr
+amounter verify --database-url 'sqlite://ledger.db?mode=rwc'  # audit, read-only
 ```
 
 State persists in the database between runs, so a second run continues the ledger
@@ -79,6 +80,57 @@ Dispute, resolve and chargeback rows carry no id of their own, so they **cannot*
 be deduplicated: a redelivered `dispute` that arrives after a `resolve` disputes
 the transaction again. Within a state machine they are only protected by the
 state checks (e.g. a second `chargeback` is rejected because nothing is held).
+
+## Audit journal
+
+Every committed change appends one row to the `journal` table, in the same
+database transaction as the change and under the same account lock: applied
+deposits, withdrawals, disputes, resolves and chargebacks, and the
+deposit/withdrawal tombstones (with their `rejected_reason`). Identical replays
+and the rejections that roll back (dispute-like ones, a conflicting duplicate
+id) change nothing and are not journaled.
+
+| Column | |
+| --- | --- |
+| `seq` | autoincrement primary key: the global order (gaps are possible on Postgres) |
+| `client`, `tx` | as in the operation (for a dispute-like row, the referenced tx) |
+| `kind` | 0 deposit, 1 withdrawal, 2 dispute, 3 resolve, 4 chargeback |
+| `amount` | the operation amount; for a dispute-like row, the referenced transaction's |
+| `rejected_reason` | `NULL` when applied, else the tombstone's rejection code |
+| `available_after`, `held_after`, `locked_after` | the account right after the operation |
+| `at` | unix milliseconds; informational, no check reads it |
+
+So each row is a snapshot of its account, and a client's previous state is its
+previous row (or the all-zero account).
+
+`amounter verify` (read-only) streams the journal in `seq` order and checks that
+each row follows from the client's previous one by the account rules (the same
+methods ingest uses), then that every `accounts` row equals its client's last
+row (a client without rows must be all zero). Memory is O(clients); one pass over
+`journal` and one over `accounts`. It prints one plain line per discrepancy on
+stdout and exits non-zero if there is any; clean means no output:
+
+```text
+journal seq 3 (client 1, tx 3): available should be 1.5000, is 9.0000
+accounts client 1: held should be 2.0000, is 0.0000
+```
+
+Limitations:
+
+- Detection only: nothing rebuilds the tables from the journal, and `verify` does
+  not look at `transactions` (a wrong dispute state, a missing or stray row).
+- The journal lives in the same database: whoever can rewrite the tables can
+  rewrite the journal too.
+- No tamper-proofing beyond continuity. A consistent rewrite of a client's rows
+  from some row to the end passes the journal check, and an appended consistent
+  row shows only against `accounts`. A deleted row that changes no balance (a
+  tombstone, a zero amount, a dispute with its resolve) is not seen at all. A
+  hash chain would be the next step.
+- Not a full input log: duplicates and rolled-back rejections are not journaled.
+- A database written before the journal existed has no rows for that history:
+  `verify` reports those accounts.
+- Run `verify` on a quiet database. It reads in one database transaction, a
+  snapshot on SQLite but not under Postgres' default isolation.
 
 ## Logging
 
@@ -178,11 +230,11 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 | `src/amount.rs` | fixed-point `Amount` |
 | `src/model.rs` | `Operation`, id types |
 | `src/format/csv.rs` | CSV wire format: `decode`, `encode_report` |
-| `src/entity/` | SeaORM entities (`accounts`, `transactions`) with the ledger rules as methods, the report row `account::Summary` and `Model::summaries` |
+| `src/entity/` | SeaORM entities (`accounts`, `transactions`, `journal`) with the ledger rules as methods, the report row `account::Summary`, `Model::summaries` and the audit `journal::Model::verify` |
 | `src/store.rs` | connection handling, table creation |
-| `src/engine.rs` | applies one operation: DB transaction, account lock, rules, save |
+| `src/engine.rs` | applies one operation: DB transaction, account lock, rules, save, journal row |
 | `src/pipeline.rs` | `ingest` (operations to outcomes) and the run `IngestionReport` |
-| `src/main.rs` | clap CLI |
+| `src/main.rs` | clap CLI (ingest, `verify`) |
 | `src/telemetry.rs` | CLI-only `tracing` subscriber setup (text/JSON, filters) |
 | `tests/` | CLI, pipeline and concurrency tests; `common/` shared fixtures |
 

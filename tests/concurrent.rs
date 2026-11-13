@@ -1,6 +1,6 @@
 //! Several independent streams sharing one `Store`, as a TCP server would.
 
-use amounter::Store;
+use amounter::{Store, entity::journal};
 use indoc::indoc;
 
 mod common;
@@ -108,4 +108,31 @@ async fn postgres_concurrent_streams_lose_no_updates() {
             "{out}"
         );
     }
+}
+
+/// Journal rows are written under the account lock: per client, `seq` order
+/// is apply order, so the continuity check passes.
+#[tokio::test]
+async fn concurrent_streams_journal_in_apply_order() {
+    let store = Store::in_memory().await.unwrap();
+    let handles: Vec<_> = (0..4u32)
+        .map(|k| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let csv = format!(
+                    "{CSV_HEADER}{}{}",
+                    deposit_rows(k * 100, 25, 1),
+                    deposit_rows(k * 100 + 50, 25, 2 + k as u16),
+                );
+                ingest(csv.as_bytes(), &store, |_, _| {}).await.unwrap()
+            })
+        })
+        .collect();
+    for h in handles {
+        assert_eq!(h.await.unwrap().applied, 50);
+    }
+    assert_eq!(
+        journal::Model::verify(&store).await.unwrap(),
+        Vec::<String>::new()
+    );
 }

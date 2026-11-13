@@ -2,7 +2,7 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Sch
 
 use crate::{
     Result,
-    entity::{account, transaction},
+    entity::{account, journal, transaction},
 };
 
 /// Handle to the database.
@@ -42,6 +42,7 @@ impl Store {
         for mut table in [
             schema.create_table_from_entity(account::Entity),
             schema.create_table_from_entity(transaction::Entity),
+            schema.create_table_from_entity(journal::Entity),
         ] {
             db.execute(table.if_not_exists()).await?;
         }

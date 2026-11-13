@@ -11,6 +11,10 @@
 //! `transactions` (with `rejected_reason` set, balances untouched), so its tx id
 //! stays taken.
 //!
+//! Every committed change (applied operation or tombstone) also appends a
+//! [`journal`] row with the account right after it, under the same account
+//! lock, so per-client journal order is apply order.
+//!
 //! Rules:
 //! - Deposits/withdrawals carry an amount (zero is fine; the decoder rejects a
 //!   missing one) and need an unused tx id.
@@ -29,7 +33,7 @@ use sea_orm::{
 use crate::{
     Rejection, Result,
     entity::{
-        account,
+        account, journal,
         transaction::{self, TxKind},
     },
     model::Operation,
@@ -87,7 +91,7 @@ async fn apply_in<T: ConnectionTrait>(
         .await?
         .ok_or_else(|| DbErr::RecordNotFound(format!("account {client}")))?;
 
-    match *op {
+    let amount = match *op {
         Operation::Deposit { amount, .. } | Operation::Withdrawal { amount, .. } => {
             let (kind, outcome) = match *op {
                 Operation::Deposit { .. } => (TxKind::Deposit, account.deposit(amount)),
@@ -115,9 +119,12 @@ async fn apply_in<T: ConnectionTrait>(
                     Err(Rejection::DuplicateTx) // tx_id "reuses" are not dupes. Error it.
                 });
             }
-            if let Err(why) = outcome {
-                return Ok(Ok(Outcome::Rejected(why)));
+            if let Err(reason) = outcome {
+                let tombstone = journal::Model::new(op, amount, &account).rejected(reason);
+                tombstone.append(db).await?;
+                return Ok(Ok(Outcome::Rejected(reason)));
             }
+            amount
         }
         Operation::Dispute { .. } | Operation::Resolve { .. } | Operation::Chargeback { .. } => {
             let Some(mut stored) = transaction::Entity::find_by_id(tx_id).one(db).await? else {
@@ -137,17 +144,21 @@ async fn apply_in<T: ConnectionTrait>(
             if let Err(reason) = outcome {
                 return Ok(Err(reason));
             }
+            let amount = stored.amount;
             transaction::ActiveModel::from(stored)
                 .reset_all()
                 .update(db)
                 .await?;
+            amount
         }
-    }
+    };
 
+    let journal_log = journal::Model::new(op, amount, &account);
     account::ActiveModel::from(account)
         .reset_all()
         .update(db)
         .await?;
+    journal_log.append(db).await?;
     Ok(Ok(Outcome::Applied))
 }
 
@@ -212,6 +223,76 @@ mod tests {
         ] {
             assert_eq!(apply(store.db(), &op).await.unwrap(), want, "{op:?}");
         }
+    }
+
+    /// One row per committed change, each the account right after it.
+    #[tokio::test]
+    async fn apply_journals_changes_and_tombstones_only() {
+        use sea_orm::QueryOrder;
+        let store = Store::in_memory().await.unwrap();
+        let b = crate::Amount::from_raw(30_000);
+        for op in [
+            Deposit {
+                client: 1,
+                tx: 1,
+                amount: A,
+            },
+            Deposit {
+                client: 1,
+                tx: 1,
+                amount: A,
+            }, // duplicate: not journaled
+            Deposit {
+                client: 2,
+                tx: 1,
+                amount: A,
+            }, // conflicting id, rolls back: not journaled
+            Withdrawal {
+                client: 1,
+                tx: 2,
+                amount: b,
+            }, // tombstone
+            Dispute { client: 1, tx: 9 }, // rolls back: not journaled
+            Dispute { client: 1, tx: 1 },
+            Resolve { client: 1, tx: 1 },
+            Dispute { client: 1, tx: 1 },
+            Chargeback { client: 1, tx: 1 },
+            Deposit {
+                client: 1,
+                tx: 3,
+                amount: b,
+            }, // tombstone on the locked account
+        ] {
+            apply(store.db(), &op).await.unwrap();
+        }
+        let rows: Vec<_> = journal::Entity::find()
+            .order_by_asc(journal::Column::Seq)
+            .all(store.db())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                let after = (r.available_after.raw(), r.held_after.raw(), r.locked_after);
+                (r.seq, r.kind, r.tx, r.amount, r.rejected_reason, after)
+            })
+            .collect();
+        use journal::OpKind as K;
+        let (funds, locked) = (
+            Some("InsufficientFunds".into()),
+            Some("AccountLocked".into()),
+        );
+        assert_eq!(
+            rows,
+            [
+                (1, K::Deposit, 1, A, None, (10_000, 0, false)),
+                (2, K::Withdrawal, 2, b, funds, (10_000, 0, false)),
+                (3, K::Dispute, 1, A, None, (0, 10_000, false)),
+                (4, K::Resolve, 1, A, None, (10_000, 0, false)),
+                (5, K::Dispute, 1, A, None, (0, 10_000, false)),
+                (6, K::Chargeback, 1, A, None, (0, 0, true)),
+                (7, K::Deposit, 3, b, locked, (0, 0, true)),
+            ]
+        );
     }
 
     /// A nested `begin` is a savepoint: a rolled-back rejection leaves no trace

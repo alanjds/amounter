@@ -2,4 +2,5 @@
 //! PostgreSQL has no unsigned integer types.
 
 pub mod account;
+pub mod journal;
 pub mod transaction;
