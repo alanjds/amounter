@@ -17,9 +17,10 @@ the Project Owner.
 3. **Locked accounts.** A chargeback locks the account, which then rejects
    deposits and withdrawals. Dispute / resolve / chargeback on a locked account
    are currently still accepted (the engine only checks the lock for deposits and
-   withdrawals). Decide explicitly. Only a chargeback on a locked account is
-   pinned (a unit test in `src/entity/account.rs`); dispute and resolve on one,
-   and the whole path through the engine, are not.
+   withdrawals). Decide explicitly. Pinned both ways: unit tests in
+   `src/entity/account.rs` (chargeback) and end-to-end cases in
+   `tests/pipeline.rs` (`dispute_accepted_on_locked_account`,
+   `resolve_accepted_on_locked_account`).
 4. **Lifecycle after resolve.** Current behavior: a resolved transaction returns
    to normal and can be disputed again; a charged-back one can no longer be
    disputed, resolved or charged back. Pinned by unit tests in
@@ -104,8 +105,7 @@ the Project Owner.
 17. **Logging.** Implemented: `tracing` replaces `eprintln!`. The lib only emits
     events/spans; the binary installs the subscriber (`src/telemetry.rs`). Text by
     default, JSON with `LOG_FORMAT=json`, filter from `RUST_LOG` (default `warn`),
-    stdout stays CSV-only
-    (see README, "Logging").
+    stdout stays CSV-only.
 18. **OTEL export (follow-up, not implemented).** Export traces to an OTLP endpoint.
     Notes for whoever picks it up:
     - optional `otlp` cargo feature; no OpenTelemetry crate in the default build;
