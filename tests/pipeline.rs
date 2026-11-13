@@ -353,6 +353,17 @@ async fn missing_amount_error_names_the_row_and_keeps_earlier_rows() {
     );
 }
 
+/// Without `mode=rwc` in the URL, sqlx alone would not create the file.
+#[rstest]
+#[case::bare("")]
+#[case::other_query("?cache=shared")]
+#[tokio::test]
+async fn file_database_url_without_a_mode_is_created(temp_db: TempDb, #[case] query: &str) {
+    let url = temp_db.url().replace("?mode=rwc", query);
+    assert!(!url.contains("mode="), "{url}");
+    Store::connect(&url).await.unwrap();
+}
+
 #[rstest]
 #[tokio::test]
 async fn file_database_persists_across_connections(temp_db: TempDb) {

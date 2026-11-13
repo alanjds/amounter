@@ -16,7 +16,15 @@ pub struct Store {
 impl Store {
     #[tracing::instrument(skip_all, fields(backend = scheme(url)))]
     pub async fn connect(url: &str) -> Result<Self> {
-        let mut opts = ConnectOptions::new(url);
+        let url =
+            if url.starts_with("sqlite") && !url.contains("mode=") && !url.contains(":memory:") {
+                // SQLite URL without `mode=rwc` is not created by sqlx automatically
+                let sep = if url.contains('?') { '&' } else { '?' };
+                format!("{url}{sep}mode=rwc")
+            } else {
+                url.to_owned()
+            };
+        let mut opts = ConnectOptions::new(url.as_str());
 
         // Set RUST_LOG=...,sqlx=debug` if you want all SQL calls. I wouldn't.
         opts.sqlx_logging(tracing::enabled!(target: "sqlx::query", tracing::Level::DEBUG))
