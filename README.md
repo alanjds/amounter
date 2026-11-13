@@ -94,8 +94,8 @@ A rule violation *rejects* the row: it is skipped and logged as a `WARN` with
 `row` and `reason`. Malformed CSV, an unknown `type`, a deposit or withdrawal
 without an amount, or a database failure is fatal: non-zero exit, no report.
 
-Dispute, resolve and chargeback rows cannot be deduplicated as they have no own id: a redelivered `dispute` arriving after a `resolve` disputes the
-transaction again.
+Dispute, resolve and chargeback rows cannot be deduplicated as they have no own id of their own:
+a redelivered `dispute` arriving after a `resolve` disputes the transaction again.
 
 The choices the spec left open are in
 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md).
@@ -129,8 +129,7 @@ back change nothing, so they are not journaled.
 
 Each row is also a snapshot of the client's account right after the operation
 (`available_after`, `held_after`, `locked_after`), so a client's previous state
-is its previous row. `seq` is the
-global order, assigned by the database.
+is its previous row. `seq` is the global order, assigned by the database.
 
 `amounter verify` streams the journal in `seq` order and checks that:
 
