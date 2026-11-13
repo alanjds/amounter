@@ -89,6 +89,35 @@ const HEADER: &str = "client,available,held,total,locked\n";
     "},
     1
 )]
+#[case::dispute_accepted_on_locked_account(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        deposit,1,2,3.0
+        dispute,1,1,
+        chargeback,1,1,
+        dispute,1,2,
+    "},
+    indoc! {"
+        1,0.0000,3.0000,3.0000,true
+    "},
+    0
+)]
+#[case::resolve_accepted_on_locked_account(
+    indoc! {"
+        type,client,tx,amount
+        deposit,1,1,2.0
+        deposit,1,2,3.0
+        dispute,1,1,
+        dispute,1,2,
+        chargeback,1,1,
+        resolve,1,2,
+    "},
+    indoc! {"
+        1,3.0000,0.0000,3.0000,true
+    "},
+    0
+)]
 #[case::dispute_other_clients_tx_ignored(
     indoc! {"
         type,client,tx,amount

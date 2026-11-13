@@ -17,10 +17,13 @@ the Project Owner.
 3. **Locked accounts.** A chargeback locks the account, which then rejects
    deposits and withdrawals. Dispute / resolve / chargeback on a locked account
    are currently still accepted (the engine only checks the lock for deposits and
-   withdrawals). Decide explicitly; no test pins this down.
+   withdrawals). Decide explicitly. Only a chargeback on a locked account is
+   pinned (a unit test in `src/entity/account.rs`); dispute and resolve on one,
+   and the whole path through the engine, are not.
 4. **Lifecycle after resolve.** Current behavior: a resolved transaction returns
    to normal and can be disputed again; a charged-back one can no longer be
-   disputed, resolved or charged back. No tests pin this down yet.
+   disputed, resolved or charged back. Pinned by unit tests in
+   `src/entity/transaction.rs` (`dispute_rules`, `resolve_and_chargeback_rules`).
 5. **Zero amounts.** Deposits and withdrawals of `0` are accepted (decided); the
    client then appears in the report with zeros. A missing amount is malformed input (item 10).
 6. **Tx id scope.** Tx ids are globally unique across clients; a deposit or
