@@ -37,9 +37,9 @@ client,available,held,total,locked
 
 ## Usage
 
-```sh
-amounter transactions.csv          # same as `amounter ingest <filename>`
-cat transactions.csv | amounter -  # stdin: `-`, `--`, or no argument
+```console
+amounter transactions.csv                  # same as `amounter ingest <filename>`
+cat transactions.csv | amounter -          # stdin: `-`, `--`, or no argument
 DATABASE_URL=postgres://user:pw@host/db amounter ingest transactions.csv
 DATABASE_URL=postgres://user:pw@host/db amounter verify
 ```
@@ -140,7 +140,8 @@ is its previous row. `seq` is the global order, assigned by the database.
 It prints one plain line per discrepancy on stdout and
 exits non-zero if there is any. Clean means no output.
 
-```text
+```console
+$ DATABASE_URL=... cargo run -- verify
 journal seq 3 (client 1, tx 3): available should be 1.5000, is 9.0000
 accounts client 1: held should be 2.0000, is 0.0000
 ```
@@ -195,7 +196,7 @@ async fn run(
 
 The toolchain is pinned in `rust-toolchain.toml`.
 
-```sh
+```console
 cargo nextest run    # or `cargo test`
 cargo clippy --all-targets
 cargo fmt --check
@@ -204,7 +205,7 @@ cargo fmt --check
 The Postgres tests are skipped unless `AMOUNTER_TEST_POSTGRES` holds the URL of
 a scratch database (its tables are truncated):
 
-```sh
+```console
 AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 ```
 
@@ -213,7 +214,7 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 The generator `examples/gen_load.rs` writes deterministic CSVs of any size,
 within some selectable profiles:
 
-```sh
+```console
 cargo run --release --example gen_load -- 1000000 --profile mixed > big.csv
 ```
 
