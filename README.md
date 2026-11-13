@@ -134,30 +134,37 @@ Limits:
 
 ## Library
 
-Three independent, lazy stages:
+Three independent, lazy stages: decode, ingest, summary
 
 ```rust
-use amounter::{Store, Outcome, entity::account, format::csv, pipeline};
+use amounter::{Outcome, Store, entity::account, format::csv, pipeline};
 use futures_util::TryStreamExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 
-let store = Store::connect("sqlite://ledger.db?mode=rwc").await?;
-let operations = csv::decode(reader); // Stream<(Seq, Operation)>
-let mut outcomes = Box::pin(pipeline::ingest(store.clone(), operations));
-// outcomes: Stream<(Seq, Outcome)>
-while let Some((row, outcome)) = outcomes.try_next().await? {
-    if let Outcome::Rejected(reason) = outcome {
-        tracing::warn!(row, %reason, "rejected")
+async fn run(
+    reader: impl AsyncRead + Unpin + Send,
+    mut writer: impl AsyncWrite + Unpin + Send,
+) -> Result<(), csv::Error> {
+    let store = Store::connect("sqlite://ledger.db").await?;
+    // Stream<Item = Result<(Seq, Operation), csv::Error>>
+    let operations = csv::decode(reader);
+    // Stream<Item = Result<(Seq, Outcome), csv::Error>>
+    let mut outcomes = Box::pin(pipeline::ingest(store.clone(), operations));
+    while let Some((row, outcome)) = outcomes.try_next().await? {
+        if let Outcome::Rejected(reason) = outcome {
+            tracing::warn!(row, %reason, "rejected")
+        }
     }
+    // Independent of the above, even concurrently if networked DB:
+    let summaries = account::Model::summaries(&store).await?;
+    csv::encode_report(Box::pin(summaries), &mut writer).await
 }
-// Independent of the above, even concurrently if networked DB:
-let summaries = account::Model::summaries(&store).await?;
-csv::encode_report(Box::pin(summaries), &mut writer).await?;
 ```
 
 - `decode` reads one row per pass. Could be implemented for other formats than CSV. (JSONL over TCP?)
 - `ingest` applies each Operation within a DB transaction
   - There is no batching _for now_. Could be done per account
-- Each ingestion does `SELECT ... FOR UPDATE` on the client row on Postgres. SQLite needs it not, as have no concurrency.
+- Each ingestion does `SELECT ... FOR UPDATE` on the client row on Postgres. SQLite concurrency is not supported.
 - After the first error (malformed row, missing amount, database failure) the
   streams end. Operations before it stays committed.
 - Money is the fixed-point `Amount` (integer ten-thousandths).
@@ -170,7 +177,7 @@ csv::encode_report(Box::pin(summaries), &mut writer).await?;
 The toolchain is pinned in `rust-toolchain.toml`.
 
 ```sh
-cargo nextest run
+cargo nextest run        # needs `cargo-nextest`; plain `cargo test` works too
 cargo clippy --all-targets
 cargo fmt --check
 ```
