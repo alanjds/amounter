@@ -40,7 +40,7 @@ use crate::{
 pub enum Outcome {
     /// The operation changed the ledger.
     Applied,
-    /// Expecting at-lest-once deliveries, which can produce duplicates.
+    /// Expecting at-least-once deliveries, which can produce duplicates.
     Duplicate,
     /// A business rule refused it; see the module docs for what is kept.
     Rejected(Rejection),

@@ -50,10 +50,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Stage 1 decodes, stage 2 applies; both are lazy and run in lockstep.
     let operations = csv::decode(input);
     let mut outcomes = Box::pin(pipeline::ingest(store.clone(), operations));
-    let mut injestion = IngestionReport::default();
+    let mut ingestion = IngestionReport::default();
     async {
         while let Some((row, outcome)) = outcomes.try_next().await? {
-            injestion.record(&outcome);
+            ingestion.record(&outcome);
             if let Outcome::Rejected(reason) = outcome {
                 tracing::warn!(row, reason = %reason, "rejected");
             }
@@ -63,9 +63,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     .instrument(tracing::info_span!("ingest"))
     .await?;
     tracing::info!(
-        applied = injestion.applied,
-        duplicates = injestion.duplicates,
-        rejected = injestion.rejected,
+        applied = ingestion.applied,
+        duplicates = ingestion.duplicates,
+        rejected = ingestion.rejected,
         "done"
     );
 
