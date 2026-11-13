@@ -197,7 +197,7 @@ async fn run(
 The toolchain is pinned in `rust-toolchain.toml`.
 
 ```sh
-cargo nextest run        # needs `cargo-nextest`; plain `cargo test` works too
+cargo nextest run    # or `cargo test`
 cargo clippy --all-targets
 cargo fmt --check
 ```
