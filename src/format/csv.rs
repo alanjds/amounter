@@ -2,7 +2,7 @@
 
 use csv_async::{AsyncReaderBuilder, AsyncWriterBuilder, Trim};
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{Amount, ClientId, Seq, TxId, entity::account::Summary, model::Operation};
@@ -83,7 +83,7 @@ where
 /// One input CSV row. `amount` is empty for dispute/resolve/chargeback.
 #[derive(Debug, Clone, Copy, Deserialize)]
 struct Row {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", deserialize_with = "case_insensitive_kind")]
     kind: RowKind,
     client: ClientId,
     tx: TxId,
@@ -91,16 +91,19 @@ struct Row {
     amount: Option<Amount>,
 }
 
-/// The `type` column, but "kind" :)
-#[derive(Debug, Clone, Copy, Deserialize, strum::IntoStaticStr)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+/// The `type` column, but "kind" :) Matched ignoring ASCII case.
+#[derive(Debug, Clone, Copy, strum::IntoStaticStr, strum::EnumString)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 enum RowKind {
     Deposit,
     Withdrawal,
     Dispute,
     Resolve,
     Chargeback,
+}
+
+fn case_insensitive_kind<'de, D: Deserializer<'de>>(d: D) -> Result<RowKind, D::Error> {
+    String::deserialize(d)?.parse().map_err(D::Error::custom)
 }
 
 impl Row {
@@ -191,6 +194,19 @@ mod tests {
                 (2, Operation::Dispute { client: 1, tx: 1 }),
                 (3, Operation::Resolve { client: 1, tx: 1 }),
             ]
+        );
+    }
+
+    #[rstest]
+    #[case::capitalized("Deposit")]
+    #[case::upper("DEPOSIT")]
+    #[case::mixed("dEpOsIt")]
+    #[tokio::test]
+    async fn decode_type_ignores_case(#[case] kind: &str) {
+        let got = decoded(&format!("type,client,tx,amount\n{kind},1,1,1.0\n")).await;
+        assert!(
+            matches!(got.as_slice(), [Ok((1, Operation::Deposit { .. }))]),
+            "{got:?}"
         );
     }
 
