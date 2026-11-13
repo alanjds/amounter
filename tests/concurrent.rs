@@ -74,7 +74,7 @@ async fn postgres_concurrent_streams_lose_no_updates() {
     // `from_connection` creates the tables; only then can they be truncated.
     let db = sea_orm::Database::connect(&url).await.unwrap();
     let store = Store::from_connection(db.clone()).await.unwrap();
-    db.execute_unprepared("TRUNCATE accounts, transactions")
+    db.execute_unprepared("TRUNCATE accounts, transactions, journal")
         .await
         .unwrap();
 

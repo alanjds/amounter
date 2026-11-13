@@ -336,7 +336,7 @@ mod tests {
         };
         let db = sea_orm::Database::connect(&url).await.unwrap();
         let store = Store::from_connection(db.clone()).await.unwrap();
-        db.execute_unprepared("TRUNCATE accounts, transactions")
+        db.execute_unprepared("TRUNCATE accounts, transactions, journal")
             .await
             .unwrap();
         outer_transaction_keeps_savepoints(&store).await;
