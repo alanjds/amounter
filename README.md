@@ -100,6 +100,26 @@ transaction again.
 The choices the spec left open are in
 [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md).
 
+## Correctness
+
+How the rules are enforced and checked:
+
+- **Types:** `Operation` carries an amount only on deposits and withdrawals.
+  `Amount` is fixed-point with checked arithmetic and strict parsing. A rule
+  violation (`Rejection`, the row is skipped) is a different type from a fatal
+  `Error`.
+- **Rules are plain methods** on the entity models (`account::Model`,
+  `transaction::Model`), with no I/O. Their unit tests are table-driven and also
+  check that the state is unchanged after a rejection.
+- **End to end:** `tests/pipeline.rs` runs CSV in, report out, one case per rule
+  and edge (the spec example is `tests/fixtures/transactions.csv`).
+  `tests/cli.rs` covers the binary: exit codes, stdin, `verify`.
+- **Concurrency:** `tests/concurrent.rs` runs concurrent streams on the same
+  client. Its Postgres test is the one that exercises the row locks.
+- **Audit:** generated histories from several seeds must pass `verify`.
+- The ledger choices the spec left open are written down in
+  [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md), most of them pinned by a test.
+
 ## Audit journal
 
 Every committed change appends one row to the `journal` table, in the same
