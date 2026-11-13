@@ -12,16 +12,16 @@ Internal architecture is based on MVC, with SeaORM structs on Model layer,
 CSV as the only View layer _for now_
 and the CLI as the only Controller _for now_.
 
-The idea is to have clear segregations to allow the lib to evolve for network-based consumption in the future.
+The idea is to have clear separation to allow the lib to evolve for network-based consumption in the future.
 
 ### AI usage disclaimer
 
 AI assistance was used since the beginning, generating code, tests
-and adversarial reasoning. Commits are my own, with the prompts replayed on the `Prior inputs` sections by the bottom
-of commit messages, specially on the initial commits.
+and adversarial reasoning. Commits are my own, with the prompts in `Prior inputs` sections at the bottom
+of commit messages, especially on the initial commits.
 
-Later commits have a summary of what the prompts asked and reached, over many
-turns from last commit to this one.
+Later commits have a summary of what the prompts asked and reached,
+over the many chat turns from last commit to the current.
 
 Initial commits are more "loose" on code quality & readability,
 with further refactors up to the current state.
@@ -85,10 +85,10 @@ before diffing two runs.
 - Disputes may drive `available` negative. **It is the only way a
   balance goes negative.**
 - Chargebacks lock its accounts permanently _for now_.
-- **Locked accounts** reject deposits and withdrawals. Still allows
+- **Locked accounts** reject deposits and withdrawals. Still accept
   dispute, resolve and chargeback.
-- Rejected deposit/withdrawal burn its tx id
-- Rejected dispute-like row leaves no trace.
+- Rejected deposit/withdrawal burns its tx id
+- Rejected dispute-like row leaves no DB trace.
 
 A rule violation *rejects* the row: it is skipped and logged as a `WARN` with
 `row` and `reason`. Malformed CSV, an unknown `type`, a deposit or withdrawal
@@ -186,7 +186,7 @@ async fn run(
   - There is no batching _for now_. Could be done per account
 - Each ingestion does `SELECT ... FOR UPDATE` on the client row on Postgres. SQLite concurrency is not supported.
 - After the first error (malformed row, missing amount, database failure) the
-  streams end. Operations before it stays committed.
+  streams end. Operations before it stay committed.
 - Money is the fixed-point `Amount` (integer ten-thousandths).
   - No DB conversion surprises
   - No floats
