@@ -37,7 +37,7 @@ client,available,held,total,locked
 
 ## Usage
 
-```console
+```bash
 amounter transactions.csv                  # same as `amounter ingest <filename>`
 cat transactions.csv | amounter -          # stdin: `-`, `--`, or no argument
 DATABASE_URL=postgres://user:pw@host/db amounter ingest transactions.csv
@@ -196,7 +196,7 @@ async fn run(
 
 The toolchain is pinned in `rust-toolchain.toml`.
 
-```console
+```bash
 cargo nextest run    # or `cargo test`
 cargo clippy --all-targets
 cargo fmt --check
@@ -205,7 +205,7 @@ cargo fmt --check
 The Postgres tests are skipped unless `AMOUNTER_TEST_POSTGRES` holds the URL of
 a scratch database (its tables are truncated):
 
-```console
+```bash
 AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 ```
 
@@ -214,7 +214,7 @@ AMOUNTER_TEST_POSTGRES=postgres://user:pw@localhost/scratch cargo nextest run
 The generator `examples/gen_load.rs` writes deterministic CSVs of any size,
 within some selectable profiles:
 
-```console
+```bash
 cargo run --release --example gen_load -- 1000000 --profile mixed > big.csv
 ```
 
